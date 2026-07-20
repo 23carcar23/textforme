@@ -197,8 +197,13 @@ class FakeResponder:
         self.should_raise = should_raise
         self.calls: list[tuple[str, str]] = []
 
-    async def generate_reply(self, contact, recent_messages, incoming_message, model_id, max_reply_chars) -> str:
+    async def generate_reply(
+        self, contact, recent_messages, incoming_message, model_id, max_reply_chars,
+        style_profile: str = "",
+    ) -> str:
         self.calls.append((contact.chat_guid, model_id))
+        self.style_profiles = getattr(self, "style_profiles", [])
+        self.style_profiles.append(style_profile)
         if self.should_raise is not None:
             raise self.should_raise
         return self.reply_text
@@ -812,3 +817,16 @@ async def test_models_list_api_failure_returns_anthropic_unavailable():
     response = await daemon._handle_request_line(b'{"id": 1, "method": "models.list", "params": {}}')
     assert response["ok"] is False
     assert response["error"]["code"] == "ANTHROPIC_UNAVAILABLE"
+
+
+async def test_style_profile_from_settings_reaches_responder():
+    db = FakeDatabase()
+    db.set_setting("selected_model_id", "claude-test")
+    db.set_setting("response_delay_seconds", "0")
+    db.set_setting("style_profile", "short, lowercase, friendly")
+    imsg = FakeImsgClient(chats=[])
+    responder = FakeResponder()
+    daemon = make_daemon(database=db, imsg_client=imsg, responder=responder)
+    db.upsert_contact(make_contact(chat_guid="c1", chat_id=1, ai_enabled=True))
+    await daemon.process_message(make_message(rowid=1, guid="g1", chat_id=1, text="hi"))
+    assert responder.style_profiles == ["short, lowercase, friendly"]

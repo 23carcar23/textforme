@@ -188,6 +188,7 @@ class TextForMeApp(App[None]):
         self.client = client or DaemonClient()
         self._poll_interval = poll_interval
         self._connected = False
+        self._model_names: dict[str, str] = {}
 
     def compose(self) -> ComposeResult:
         yield _HeaderBar()
@@ -244,8 +245,33 @@ class TextForMeApp(App[None]):
             self._set_connected(False)
             return
         self._set_connected(True)
+        # Best-effort: resolve the selected model id to its display name.
+        models = await self._fetch_models(notify_errors=False)
         self.query_one(ContactsTable).load(contacts_result.get("contacts", []))
-        self.query_one(SettingsPanel).load(settings_result.get("settings", {}), has_api_key())
+        self.query_one(SettingsPanel).load(
+            settings_result.get("settings", {}),
+            has_api_key(),
+            model_names=self._model_names if models else None,
+        )
+
+    async def _fetch_models(self, notify_errors: bool) -> list[dict[str, str]]:
+        """models.list via the daemon; updates the id->display_name cache."""
+        try:
+            result = await self.client.request("models.list")
+        except RuntimeError as exc:
+            code = str(exc)
+            if notify_errors:
+                if code == "NO_API_KEY":
+                    self.notify("No API key configured — re-run onboarding first.", severity="warning")
+                else:
+                    self.notify(f"Could not fetch models: {code}", severity="error")
+            if code in _CONNECTION_ERRORS:
+                self._set_connected(False)
+            return []
+        models = result.get("models", [])
+        if models:
+            self._model_names = {m["model_id"]: m["display_name"] for m in models}
+        return models
 
     async def on_contacts_table_toggled(self, message: ContactsTable.Toggled) -> None:
         message.stop()
@@ -280,20 +306,10 @@ class TextForMeApp(App[None]):
         self, message: SettingsPanel.ModelPickRequested
     ) -> None:
         message.stop()
-        try:
-            result = await self.client.request("models.list")
-        except RuntimeError as exc:
-            code = str(exc)
-            if code == "NO_API_KEY":
-                self.notify("No API key configured — re-run onboarding first.", severity="warning")
-            else:
-                self.notify(f"Could not fetch models: {code}", severity="error")
-            if code in _CONNECTION_ERRORS:
-                self._set_connected(False)
-            return
-        models = result.get("models", [])
+        models = await self._fetch_models(notify_errors=True)
         if not models:
-            self.notify("No models available for this API key.", severity="warning")
+            if self._connected:
+                self.notify("No models available for this API key.", severity="warning")
             return
         current = self.query_one(SettingsPanel).current_value("selected_model_id")
 
@@ -302,6 +318,21 @@ class TextForMeApp(App[None]):
                 self.post_message(SettingsPanel.Changed("selected_model_id", model_id))
 
         self.push_screen(ModelPickerModal(models, current), _apply)
+
+    async def on_settings_panel_model_cycle_requested(
+        self, message: SettingsPanel.ModelCycleRequested
+    ) -> None:
+        message.stop()
+        models = await self._fetch_models(notify_errors=True)
+        if not models:
+            return
+        ids = [m["model_id"] for m in models]
+        current = self.query_one(SettingsPanel).current_value("selected_model_id")
+        try:
+            new_id = ids[(ids.index(current) + message.delta) % len(ids)]
+        except ValueError:
+            new_id = ids[0]
+        self.post_message(SettingsPanel.Changed("selected_model_id", new_id))
 
     def action_save(self) -> None:
         # Edits already apply immediately via settings.set / contacts.set_ai;

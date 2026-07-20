@@ -225,3 +225,27 @@ def test_build_request_empty_history_only_incoming():
     system, messages = build_request("Bob", [], incoming, max_reply_chars=200)
 
     assert messages == [{"role": "user", "content": "hello there"}]
+
+
+# -- style profile ---------------------------------------------------------------
+
+
+def test_style_profile_appended_to_system_prompt():
+    from tests.fixtures.factories import make_message
+    incoming = make_message(guid="g1", text="hey", is_from_me=False)
+    system, _ = __import__("textforme.anthropic.prompts", fromlist=["build_request"]).build_request(
+        "Alex", [], incoming, 300, style_profile="lowercase, brief, uses 'lol'"
+    )
+    assert "lowercase, brief, uses 'lol'" in system
+    # Safety rules must be declared to take precedence over the style guide.
+    assert "takes precedence" in system
+
+
+def test_empty_style_profile_leaves_prompt_unchanged():
+    from textforme.anthropic.prompts import build_request
+    from tests.fixtures.factories import make_message
+    incoming = make_message(guid="g1", text="hey", is_from_me=False)
+    with_style, _ = build_request("Alex", [], incoming, 300, style_profile="   ")
+    without, _ = build_request("Alex", [], incoming, 300)
+    assert with_style == without
+    assert "personal style" not in without
