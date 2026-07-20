@@ -237,20 +237,19 @@ class TestIsRunning:
 class TestStart:
     """Test launchagent.start()."""
 
-    def test_start_installs_if_needed(self, tmp_path):
-        """Call install() if daemon is not already installed."""
+    def test_start_always_installs_to_rebootstrap(self, tmp_path):
+        """start() must always (re)install: stop() boots the job out of
+        launchd, and kickstarting an unloaded job is a no-op — so a bare
+        kickstart after stop() would leave the service dead."""
         plist_path = tmp_path / "test.plist"
-        # Plist doesn't exist initially
 
         with patch("textforme.launchagent.config.LAUNCH_AGENT_PATH", plist_path):
             with patch("textforme.launchagent.install") as mock_install:
-                with patch("textforme.launchagent.is_installed") as mock_is_installed:
-                    with patch("textforme.launchagent.subprocess.run"):
-                        with patch("textforme.launchagent.os.getuid") as mock_uid:
-                            mock_uid.return_value = 501
-                            mock_is_installed.return_value = False
-                            launchagent.start()
-                            mock_install.assert_called_once()
+                with patch("textforme.launchagent.subprocess.run"):
+                    with patch("textforme.launchagent.os.getuid") as mock_uid:
+                        mock_uid.return_value = 501
+                        launchagent.start()
+                        mock_install.assert_called_once()
 
     def test_start_calls_kickstart(self, tmp_path):
         """Call launchctl kickstart after installing."""
@@ -258,29 +257,15 @@ class TestStart:
 
         with patch("textforme.launchagent.config.LAUNCH_AGENT_PATH", plist_path):
             with patch("textforme.launchagent.install"):
-                with patch("textforme.launchagent.is_installed") as mock_is_installed:
-                    with patch("textforme.launchagent.subprocess.run") as mock_run:
-                        with patch("textforme.launchagent.os.getuid") as mock_uid:
-                            mock_uid.return_value = 501
-                            mock_is_installed.return_value = False
-                            launchagent.start()
-                            # Verify kickstart was called
-                            mock_run.assert_called_once_with(
-                                ["launchctl", "kickstart", "gui/501/com.textforme.daemon"],
-                                capture_output=True,
-                            )
-
-    def test_start_skips_install_if_already_installed(self):
-        """Don't call install() if daemon is already installed."""
-        with patch("textforme.launchagent.install") as mock_install:
-            with patch("textforme.launchagent.is_installed") as mock_is_installed:
-                with patch("textforme.launchagent.subprocess.run"):
+                with patch("textforme.launchagent.subprocess.run") as mock_run:
                     with patch("textforme.launchagent.os.getuid") as mock_uid:
                         mock_uid.return_value = 501
-                        mock_is_installed.return_value = True
                         launchagent.start()
-                        # install() should not be called
-                        mock_install.assert_not_called()
+                        # Verify kickstart was called
+                        mock_run.assert_called_once_with(
+                            ["launchctl", "kickstart", "gui/501/com.textforme.daemon"],
+                            capture_output=True,
+                        )
 
 
 class TestStop:

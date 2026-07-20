@@ -38,7 +38,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from . import config, keychain
+from . import config, contact_names, keychain
 from .anthropic.client import AnthropicClient
 from .database import ContactRecord, Database
 from .messaging.client import ImsgClient
@@ -57,6 +57,8 @@ from .service.scheduler import ReplyScheduler, apply_response_delay
 logger = logging.getLogger("textformed")
 
 _HEALTH_CHECK_INTERVAL = 30.0
+_SYNC_RETRY_INTERVAL = 30.0
+_MODELS_CACHE_TTL = 600.0
 
 
 class _SocketError(Exception):
@@ -76,11 +78,16 @@ class Daemon:
         database: Database | None = None,
         responder: AnthropicResponder | None = None,
         api_key_getter: Callable[[], str | None] | None = None,
+        anthropic_client_factory: Callable[[str], Any] | None = None,
     ) -> None:
         self.imsg: ImsgClient = imsg_client if imsg_client is not None else ImsgClient()
         self.database: Database | None = database
         self._responder_override = responder
         self.api_key_getter: Callable[[], str | None] = api_key_getter or keychain.get_api_key
+        self._anthropic_factory: Callable[[str], Any] = anthropic_client_factory or AnthropicClient
+
+        self._models_cache: list[dict[str, str]] | None = None
+        self._models_cache_time = 0.0
 
         self.scheduler = ReplyScheduler()
         self._tasks: set[asyncio.Task[Any]] = set()
@@ -101,6 +108,7 @@ class Daemon:
 
         self._shutdown_event = asyncio.Event()
         self._watch_task: asyncio.Task[Any] | None = None
+        self._sync_retry_task: asyncio.Task[Any] | None = None
 
     # -- top-level lifecycle -----------------------------------------------------
 
@@ -114,8 +122,18 @@ class Daemon:
         self._last_seen_rowid = settings.last_seen_rowid
 
         await self.imsg.start()
-        await self._sync_contacts()
+        try:
+            count = await self._sync_contacts()
+            logger.info("startup contact sync ok (%d chats)", count)
+        except ImsgError as exc:
+            # Most commonly Full Disk Access not (yet) granted for the launchd
+            # context. Keep running: serve the socket so the TUI can show
+            # status, and retry in the background until access appears.
+            self._last_error = f"contact sync failed: {exc}"
+            logger.warning("initial contact sync failed (%s); daemon starting anyway", exc)
+            self._sync_retry_task = asyncio.create_task(self._retry_initial_sync())
         await self._start_socket_server()
+        logger.info("daemon ready (socket: %s)", config.SOCKET_PATH)
 
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -133,12 +151,13 @@ class Daemon:
         self._shutdown_event.set()
 
     async def _shutdown(self) -> None:
-        watch_task = self._watch_task
-        self._watch_task = None
-        if watch_task is not None:
-            watch_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await watch_task
+        for task_attr in ("_watch_task", "_sync_retry_task"):
+            task = getattr(self, task_attr)
+            setattr(self, task_attr, None)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
         pending = list(self._tasks)
         for task in pending:
@@ -168,12 +187,19 @@ class Daemon:
     async def _sync_contacts(self) -> int:
         assert self.database is not None
         chats = await self.imsg.list_contacts()
+        # Best-effort local Address Book fallback for chats where imsg had no
+        # resolved name (e.g. Contacts permission not granted to `imsg rpc`).
+        # Loaded once per sync; degrades to {} on any permission/I-O failure.
+        name_map = contact_names.load_contact_names()
         for chat in chats:
+            display_name = chat.display_name
+            if not display_name and not chat.is_group:
+                display_name = contact_names.resolve(chat.address, name_map) or ""
             self.database.upsert_contact(
                 ContactRecord(
                     chat_guid=chat.guid,
                     chat_id=chat.chat_id,
-                    display_name=chat.display_name,
+                    display_name=display_name,
                     address=chat.address,
                     service=chat.service,
                     is_group=chat.is_group,
@@ -182,6 +208,21 @@ class Daemon:
                 )
             )
         return len(chats)
+
+    async def _retry_initial_sync(self) -> None:
+        """Keep retrying the startup contact sync (e.g. until Full Disk Access
+        is granted for the launchd context), then stop."""
+        while True:
+            await asyncio.sleep(_SYNC_RETRY_INTERVAL)
+            try:
+                count = await self._sync_contacts()
+            except ImsgError as exc:
+                self._last_error = f"contact sync failed: {exc}"
+                continue
+            logger.info("contact sync recovered (%d chats)", count)
+            if (self._last_error or "").startswith("contact sync failed"):
+                self._last_error = None
+            return
 
     # -- watch loop ------------------------------------------------------------
 
@@ -475,6 +516,9 @@ class Daemon:
         if method == "settings.get":
             return {"settings": database.get_raw_settings()}
 
+        if method == "models.list":
+            return await self._list_models()
+
         if method == "settings.set":
             key = params.get("key")
             value = params.get("value")
@@ -504,6 +548,26 @@ class Daemon:
             return {}
 
         raise _SocketError("UNKNOWN_METHOD", f"unknown method: {method}")
+
+    async def _list_models(self) -> dict[str, Any]:
+        """Live model list for the TUI's model picker, cached briefly. The key
+        never leaves the daemon — only ids and display names cross the socket."""
+        now = time.monotonic()
+        if self._models_cache is not None and now - self._models_cache_time < _MODELS_CACHE_TTL:
+            return {"models": self._models_cache}
+        api_key = self.api_key_getter()
+        if not api_key:
+            raise _SocketError("NO_API_KEY", "no Anthropic API key configured")
+        client = self._anthropic_factory(api_key)
+        try:
+            models = await client.list_models()
+        except AnthropicUnavailableError as exc:
+            raise _SocketError("ANTHROPIC_UNAVAILABLE", str(exc)) from exc
+        self._models_cache = [
+            {"model_id": m.model_id, "display_name": m.display_name} for m in models
+        ]
+        self._models_cache_time = now
+        return {"models": self._models_cache}
 
     @staticmethod
     def _contact_to_dict(contact: ContactRecord) -> dict[str, Any]:

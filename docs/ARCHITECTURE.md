@@ -102,6 +102,10 @@ Methods:
   for group chats.
 - `contacts.refresh` → re-sync contacts from imsg → `{count:int}`
 - `settings.get` → `{settings:{...all keys...}}`
+- `models.list` → `{models:[{model_id, display_name}]}` — live Anthropic Models
+  API list fetched BY THE DAEMON (the key never crosses the socket), cached
+  ~10 min. Errors: `NO_API_KEY`, `ANTHROPIC_UNAVAILABLE`. Feeds the TUI's
+  model picker so the model can change without re-running onboarding.
 - `settings.set` params `{key, value}` → `{}`; error `UNKNOWN_KEY` if key not in
   DEFAULT_SETTINGS; `selected_model_id`, `paused`, `global_ai_enabled` take effect
   immediately.

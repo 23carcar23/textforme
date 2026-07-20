@@ -117,9 +117,13 @@ def is_running() -> bool:
 
 
 def start() -> None:
-    """Kickstart the agent now (install first if needed)."""
-    if not is_installed():
-        install()
+    """Ensure the agent is loaded and running.
+
+    `stop()` boots the job out of launchd entirely, so starting must
+    re-bootstrap (install() is idempotent and does bootout+bootstrap),
+    not merely kickstart — kickstarting an unloaded job is a no-op.
+    """
+    install()
 
     uid = os.getuid()
     subprocess.run(

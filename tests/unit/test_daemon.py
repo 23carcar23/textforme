@@ -693,3 +693,122 @@ async def test_socket_pause_resume():
     resp = await daemon._handle_request_line(json.dumps({"id": 12, "method": "service.resume", "params": {}}).encode())
     assert resp["ok"] is True
     assert db.get_settings().paused is False
+
+
+# -- startup resilience -----------------------------------------------------------
+
+
+async def test_daemon_starts_and_serves_status_when_initial_sync_fails(monkeypatch):
+    """If the initial contact sync fails (e.g. Full Disk Access not granted in
+    the launchd context), the daemon must NOT crash-loop: it starts, serves the
+    socket so the TUI can show status, and surfaces the error in last_error."""
+    sock = Path(f"/tmp/tfm-{uuid.uuid4().hex[:8]}.sock")
+    monkeypatch.setattr(config, "SOCKET_PATH", sock)
+
+    class SyncFailingImsg(FakeImsgClient):
+        async def list_contacts(self, limit: int = 200):
+            raise ImsgUnavailableError("chat.db not readable (no Full Disk Access)")
+
+    daemon = make_daemon(imsg_client=SyncFailingImsg())
+    task = asyncio.create_task(daemon.run())
+    try:
+        for _ in range(200):
+            if sock.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert sock.exists(), "socket server never came up after failed initial sync"
+
+        response = await daemon._handle_request_line(b'{"id": 1, "method": "status", "params": {}}')
+        assert response["ok"] is True
+        assert response["result"]["running"] is True
+        assert "sync failed" in (response["result"]["last_error"] or "")
+    finally:
+        daemon.request_shutdown()
+        await asyncio.wait_for(task, timeout=5)
+        with contextlib.suppress(FileNotFoundError):
+            sock.unlink()
+
+
+async def test_daemon_retries_failed_initial_sync_until_recovery(monkeypatch):
+    """After a failed startup sync, the daemon keeps retrying in the background
+    and clears last_error once the sync succeeds (e.g. FDA granted later)."""
+    sock = Path(f"/tmp/tfm-{uuid.uuid4().hex[:8]}.sock")
+    monkeypatch.setattr(config, "SOCKET_PATH", sock)
+    monkeypatch.setattr(daemon_module, "_SYNC_RETRY_INTERVAL", 0.01)
+
+    class EventuallyHealthyImsg(FakeImsgClient):
+        def __init__(self) -> None:
+            super().__init__(chats=[])
+            self.sync_attempts = 0
+
+        async def list_contacts(self, limit: int = 200):
+            self.sync_attempts += 1
+            if self.sync_attempts < 3:
+                raise ImsgUnavailableError("no Full Disk Access yet")
+            return []
+
+    imsg = EventuallyHealthyImsg()
+    daemon = make_daemon(imsg_client=imsg)
+    task = asyncio.create_task(daemon.run())
+    try:
+        for _ in range(500):
+            if imsg.sync_attempts >= 3 and daemon._last_error is None:
+                break
+            await asyncio.sleep(0.01)
+        assert imsg.sync_attempts >= 3
+        assert daemon._last_error is None
+    finally:
+        daemon.request_shutdown()
+        await asyncio.wait_for(task, timeout=5)
+        with contextlib.suppress(FileNotFoundError):
+            sock.unlink()
+
+
+# -- models.list socket method ----------------------------------------------------
+
+
+async def test_models_list_returns_models_and_caches():
+    from textforme.anthropic.models import ModelInfo
+
+    calls = []
+
+    class FakeAnthropicClient:
+        async def list_models(self):
+            calls.append(1)
+            return [ModelInfo("claude-a", "Claude A"), ModelInfo("claude-b", "Claude B")]
+
+    daemon = make_daemon(
+        api_key_getter=lambda: "sk-test",
+        anthropic_client_factory=lambda key: FakeAnthropicClient(),
+    )
+    request = b'{"id": 1, "method": "models.list", "params": {}}'
+    response = await daemon._handle_request_line(request)
+    assert response["ok"] is True
+    assert response["result"]["models"] == [
+        {"model_id": "claude-a", "display_name": "Claude A"},
+        {"model_id": "claude-b", "display_name": "Claude B"},
+    ]
+    # Second call is served from the cache — no new API fetch.
+    await daemon._handle_request_line(request)
+    assert len(calls) == 1
+
+
+async def test_models_list_without_key_returns_no_api_key():
+    daemon = make_daemon(api_key_getter=lambda: None)
+    response = await daemon._handle_request_line(b'{"id": 1, "method": "models.list", "params": {}}')
+    assert response["ok"] is False
+    assert response["error"]["code"] == "NO_API_KEY"
+
+
+async def test_models_list_api_failure_returns_anthropic_unavailable():
+    class FailingClient:
+        async def list_models(self):
+            raise AnthropicUnavailableError("api down")
+
+    daemon = make_daemon(
+        api_key_getter=lambda: "sk-test",
+        anthropic_client_factory=lambda key: FailingClient(),
+    )
+    response = await daemon._handle_request_line(b'{"id": 1, "method": "models.list", "params": {}}')
+    assert response["ok"] is False
+    assert response["error"]["code"] == "ANTHROPIC_UNAVAILABLE"

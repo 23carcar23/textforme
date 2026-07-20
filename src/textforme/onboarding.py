@@ -35,7 +35,7 @@ import shutil
 import time
 from pathlib import Path
 
-from . import config, keychain, launchagent
+from . import config, contact_names, keychain, launchagent
 from .anthropic.client import AnthropicClient
 from .anthropic.models import ModelInfo
 from .database import ContactRecord, Database
@@ -174,12 +174,19 @@ async def _sync_contacts(db: Database) -> bool:
         except Exception as exc:  # noqa: BLE001 - best-effort during setup
             print(f"  Could not list contacts ({exc}).")
             chats = []
+        # Best-effort local Address Book fallback for chats where imsg had no
+        # resolved name (e.g. Contacts permission not granted to `imsg rpc`).
+        # Loaded once per sync; degrades to {} on any permission/I-O failure.
+        name_map = contact_names.load_contact_names()
         for chat in chats:
+            display_name = chat.display_name
+            if not display_name and not chat.is_group:
+                display_name = contact_names.resolve(chat.address, name_map) or ""
             db.upsert_contact(
                 ContactRecord(
                     chat_guid=chat.guid,
                     chat_id=chat.chat_id,
-                    display_name=chat.display_name,
+                    display_name=display_name,
                     address=chat.address,
                     service=chat.service,
                     is_group=chat.is_group,

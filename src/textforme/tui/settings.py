@@ -19,7 +19,8 @@ from textual import events
 from textual.containers import Grid
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Input, Label
+from textual.widgets import DataTable, Input, Label, OptionList
+from textual.widgets.option_list import Option
 
 # (settings key, display label). Keys prefixed with "__" are synthetic
 # (not a real settings.py key, handled specially below).
@@ -43,7 +44,7 @@ _CYCLES: dict[str, list[str]] = {
     "global_rate_limit_per_hour": ["10", "20", "60"],
 }
 
-_READ_ONLY_HINT = "Change this by re-running onboarding (quit and run `textforme install` again, or delete and reinstall)."
+_API_KEY_HINT = "Replace the API key by re-running onboarding."
 
 
 def _next_in_cycle(key: str, current: str) -> str:
@@ -99,6 +100,66 @@ class QuietHoursModal(ModalScreen[str | None]):
             self.dismiss(None)
 
 
+class ModelPickerModal(ModalScreen[str | None]):
+    """Cycle through the Claude models available to the configured API key.
+
+    Dismisses with the chosen model_id, or None if cancelled with Escape.
+    """
+
+    DEFAULT_CSS = """
+    ModelPickerModal {
+        align: center middle;
+    }
+    ModelPickerModal > Grid {
+        grid-size: 1;
+        grid-rows: auto 1fr auto;
+        width: 70;
+        max-height: 80%;
+        height: auto;
+        border: round $primary;
+        background: $panel;
+        padding: 1 2;
+    }
+    ModelPickerModal OptionList {
+        height: auto;
+        max-height: 16;
+    }
+    """
+
+    def __init__(self, models: list[dict[str, str]], current_id: str) -> None:
+        super().__init__()
+        self._models = models
+        self._current_id = current_id
+
+    def compose(self):
+        with Grid():
+            yield Label("Choose the Claude model (↑/↓ cycle, Enter select, Esc cancel):")
+            yield OptionList(
+                *[
+                    Option(f"{m['display_name']}  ({m['model_id']})", id=m["model_id"])
+                    for m in self._models
+                ]
+            )
+            yield Label("Takes effect immediately for new replies.", classes="hint")
+
+    def on_mount(self) -> None:
+        option_list = self.query_one(OptionList)
+        option_list.focus()
+        for index, model in enumerate(self._models):
+            if model["model_id"] == self._current_id:
+                option_list.highlighted = index
+                break
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        self.dismiss(event.option.id)
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            event.stop()
+            self.dismiss(None)
+
+
 class SettingsPanel(DataTable):
     """Two-column settings table: label | value."""
 
@@ -109,6 +170,9 @@ class SettingsPanel(DataTable):
             self.key = key
             self.value = value
             super().__init__()
+
+    class ModelPickRequested(Message):
+        """Posted when the user activates the Anthropic Model row."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(cursor_type="row", zebra_stripes=True, **kwargs)
@@ -140,6 +204,10 @@ class SettingsPanel(DataTable):
             except Exception:
                 pass
 
+    def current_value(self, key: str) -> str:
+        """Raw current value for a real settings key ('' if unknown)."""
+        return self._settings.get(key, "")
+
     def _display_value(self, key: str) -> str:
         if key == "__api_key__":
             return "Configured" if self._api_key_configured else "Not configured"
@@ -158,8 +226,13 @@ class SettingsPanel(DataTable):
         key = event.row_key.value
         if key is None:
             return
-        if key in ("__api_key__", "selected_model_id"):
-            self.notify(_READ_ONLY_HINT, severity="information")
+        if key == "__api_key__":
+            self.notify(_API_KEY_HINT, severity="information")
+            return
+        if key == "selected_model_id":
+            # The app fetches the live model list from the daemon and opens
+            # the picker; the TUI itself never talks to Anthropic.
+            self.post_message(self.ModelPickRequested())
             return
         if key == "global_ai_enabled":
             new_value = "false" if self._settings.get("global_ai_enabled") == "true" else "true"

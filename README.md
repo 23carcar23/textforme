@@ -98,7 +98,9 @@ textforme
 
 The app is a single screen: a header showing the service status
 ("Service: Running/Stopped"), the contacts table (AI | Contact | Number),
-and the settings panel side by side.
+and on the right the settings panel with a live tail of the daemon log
+beneath it (refreshed every 2 seconds; the log never contains message
+content, only ids, statuses, and error codes).
 
 **Key commands**:
 - **↑/↓**: Move within the focused table.
@@ -108,9 +110,11 @@ and the settings panel side by side.
 - **S**: Save (settings changes are also applied immediately as you make them).
 - **Q**: Quit the TUI (the daemon keeps running in the background).
 
-Group chats are shown dimmed and cannot be toggled. The API key and model
-rows are read-only in the TUI; replace the key or re-pick the model by
-re-running onboarding.
+Group chats are shown dimmed and cannot be toggled. Pressing Enter on the
+Anthropic Model row opens a picker fed live from Anthropic's Models API
+(via the daemon) — switch models any time without re-running onboarding;
+the change applies to the next reply. The API key row stays read-only;
+replace the key by re-running onboarding.
 
 ### Configuration (Settings Tab)
 

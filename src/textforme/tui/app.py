@@ -21,13 +21,14 @@ from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.widgets import Static
 
 from .. import config
 from ..keychain import has_api_key
 from .contacts import ContactsTable
-from .settings import SettingsPanel
+from .logs import LogPanel
+from .settings import ModelPickerModal, SettingsPanel
 
 _CONNECTION_ERRORS = {"NOT_CONNECTED", "CONNECTION_ERROR", "CONNECTION_CLOSED"}
 
@@ -151,9 +152,17 @@ class TextForMeApp(App[None]):
         width: 2fr;
         border: round $panel;
     }
-    SettingsPanel {
+    #right-col {
         width: 3fr;
+    }
+    SettingsPanel {
+        height: 12;
         border: round $panel;
+    }
+    LogPanel {
+        height: 1fr;
+        border: round $panel;
+        color: $text-muted;
     }
     #hint {
         height: 1;
@@ -184,7 +193,9 @@ class TextForMeApp(App[None]):
         yield _HeaderBar()
         with Horizontal(id="body"):
             yield ContactsTable(id="contacts")
-            yield SettingsPanel(id="settings")
+            with Vertical(id="right-col"):
+                yield SettingsPanel(id="settings")
+                yield LogPanel(id="logs")
         yield Static("", id="hint")
         yield Static(_FOOTER_TEXT, id="footer-bar")
 
@@ -264,6 +275,33 @@ class TextForMeApp(App[None]):
                 self._set_connected(False)
             return
         self.query_one(SettingsPanel).load(settings_result.get("settings", {}), has_api_key())
+
+    async def on_settings_panel_model_pick_requested(
+        self, message: SettingsPanel.ModelPickRequested
+    ) -> None:
+        message.stop()
+        try:
+            result = await self.client.request("models.list")
+        except RuntimeError as exc:
+            code = str(exc)
+            if code == "NO_API_KEY":
+                self.notify("No API key configured — re-run onboarding first.", severity="warning")
+            else:
+                self.notify(f"Could not fetch models: {code}", severity="error")
+            if code in _CONNECTION_ERRORS:
+                self._set_connected(False)
+            return
+        models = result.get("models", [])
+        if not models:
+            self.notify("No models available for this API key.", severity="warning")
+            return
+        current = self.query_one(SettingsPanel).current_value("selected_model_id")
+
+        def _apply(model_id: str | None) -> None:
+            if model_id and model_id != current:
+                self.post_message(SettingsPanel.Changed("selected_model_id", model_id))
+
+        self.push_screen(ModelPickerModal(models, current), _apply)
 
     def action_save(self) -> None:
         # Edits already apply immediately via settings.set / contacts.set_ai;
