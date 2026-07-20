@@ -145,6 +145,17 @@ class TextForMeApp(App[None]):
     TITLE = "TextForMe"
 
     CSS = """
+    * {
+        scrollbar-size-vertical: 0;
+        scrollbar-size-horizontal: 1;
+        scrollbar-background: $surface;
+        scrollbar-background-hover: $surface;
+        scrollbar-background-active: $surface;
+        scrollbar-color: $panel;
+        scrollbar-color-hover: $primary;
+        scrollbar-color-active: $primary;
+        scrollbar-corner-color: $surface;
+    }
     #body {
         height: 1fr;
     }
