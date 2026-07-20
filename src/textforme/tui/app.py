@@ -1,0 +1,283 @@
+"""Minimal Textual app. Owner: Agent 3.
+
+Layout per PRD §5: header "TextForMe  Service: Running/Stopped", contacts table
+(AI | Contact | Number) with Space toggling, settings panel, footer keys
+(↑/↓ Move, Space Toggle, Tab Settings, S Save, Q Quit).
+
+MUST NOT display message previews, history, composition, or AI-reply previews.
+
+Includes DaemonClient: a small asyncio JSON-lines client for the Unix socket
+(ARCHITECTURE §5) with connect/request/close and a is_connected property.
+If the daemon is unreachable: show "Service: Stopped", disable toggling, and
+poll for reconnection every few seconds.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from typing import Any
+
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal
+from textual.widgets import Static
+
+from .. import config
+from ..keychain import has_api_key
+from .contacts import ContactsTable
+from .settings import SettingsPanel
+
+_CONNECTION_ERRORS = {"NOT_CONNECTED", "CONNECTION_ERROR", "CONNECTION_CLOSED"}
+
+_FOOTER_TEXT = "↑/↓ Move    Space Toggle    Tab Settings    S Save    Q Quit"
+
+
+class DaemonClient:
+    """Asyncio JSON-lines client for the daemon's Unix socket (ARCHITECTURE §5).
+
+    One request in flight at a time; each request gets an auto-incrementing
+    id and a 5s timeout. Connection failures and error responses both raise
+    ``RuntimeError`` (message is the protocol error code, or a local code
+    such as ``NOT_CONNECTED``/``CONNECTION_ERROR``/``CONNECTION_CLOSED``).
+    """
+
+    def __init__(self, socket_path: Path | str | None = None, timeout: float = 5.0) -> None:
+        self._socket_path = str(socket_path) if socket_path is not None else str(config.SOCKET_PATH)
+        self._timeout = timeout
+        self._reader: asyncio.StreamReader | None = None
+        self._writer: asyncio.StreamWriter | None = None
+        self._next_id = 1
+        self._lock = asyncio.Lock()
+
+    @property
+    def is_connected(self) -> bool:
+        return self._writer is not None and not self._writer.is_closing()
+
+    async def connect(self) -> bool:
+        if self.is_connected:
+            return True
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_unix_connection(self._socket_path), timeout=self._timeout
+            )
+        except (OSError, asyncio.TimeoutError):
+            self._reader = None
+            self._writer = None
+            return False
+        self._reader = reader
+        self._writer = writer
+        return True
+
+    async def request(self, method: str, params: dict | None = None) -> dict:
+        """Returns result dict; raises RuntimeError(code) on error responses."""
+        if not self.is_connected:
+            if not await self.connect():
+                raise RuntimeError("NOT_CONNECTED")
+        async with self._lock:
+            reader, writer = self._reader, self._writer
+            if reader is None or writer is None:
+                raise RuntimeError("NOT_CONNECTED")
+            req_id = self._next_id
+            self._next_id += 1
+            payload = json.dumps({"id": req_id, "method": method, "params": params or {}}) + "\n"
+            try:
+                writer.write(payload.encode("utf-8"))
+                await asyncio.wait_for(writer.drain(), timeout=self._timeout)
+                line = await asyncio.wait_for(reader.readline(), timeout=self._timeout)
+            except (OSError, asyncio.TimeoutError) as exc:
+                await self.close()
+                raise RuntimeError("CONNECTION_ERROR") from exc
+            if not line:
+                await self.close()
+                raise RuntimeError("CONNECTION_CLOSED")
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("BAD_RESPONSE") from exc
+        if data.get("ok"):
+            return data.get("result") or {}
+        error = data.get("error") or {}
+        raise RuntimeError(error.get("code", "INTERNAL"))
+
+    async def close(self) -> None:
+        writer, self._writer = self._writer, None
+        self._reader = None
+        if writer is not None:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except OSError:
+                pass
+
+
+class _HeaderBar(Horizontal):
+    """'TextForMe' left, 'Service: Running/Stopped' right."""
+
+    DEFAULT_CSS = """
+    _HeaderBar {
+        height: 1;
+        background: $primary;
+        color: $text;
+    }
+    _HeaderBar > #app-title {
+        width: auto;
+        padding: 0 1;
+        text-style: bold;
+    }
+    _HeaderBar > #service-status {
+        width: 1fr;
+        content-align: right middle;
+        padding: 0 1;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static("TextForMe", id="app-title")
+        yield Static("Service: Stopped", id="service-status")
+
+
+class TextForMeApp(App[None]):
+    """The whole TUI: header, contacts table, settings panel, footer."""
+
+    TITLE = "TextForMe"
+
+    CSS = """
+    #body {
+        height: 1fr;
+    }
+    ContactsTable {
+        width: 2fr;
+        border: round $panel;
+    }
+    SettingsPanel {
+        width: 3fr;
+        border: round $panel;
+    }
+    #hint {
+        height: 1;
+        color: $warning;
+        content-align: center middle;
+    }
+    #footer-bar {
+        height: 1;
+        background: $panel;
+        color: $text-muted;
+        content-align: center middle;
+    }
+    """
+
+    BINDINGS = [
+        Binding("q", "quit", "Quit", show=False),
+        Binding("s", "save", "Save", show=False),
+        Binding("tab", "focus_next", "Settings", show=False),
+    ]
+
+    def __init__(self, client: DaemonClient | None = None, poll_interval: float = 3.0) -> None:
+        super().__init__()
+        self.client = client or DaemonClient()
+        self._poll_interval = poll_interval
+        self._connected = False
+
+    def compose(self) -> ComposeResult:
+        yield _HeaderBar()
+        with Horizontal(id="body"):
+            yield ContactsTable(id="contacts")
+            yield SettingsPanel(id="settings")
+        yield Static("", id="hint")
+        yield Static(_FOOTER_TEXT, id="footer-bar")
+
+    async def on_mount(self) -> None:
+        self.query_one(ContactsTable).focus()
+        await self._refresh_connection()
+        self.set_interval(self._poll_interval, self._poll)
+
+    async def _poll(self) -> None:
+        if not self._connected:
+            await self._refresh_connection()
+
+    async def _refresh_connection(self) -> None:
+        connected = await self.client.connect()
+        if connected:
+            await self._load_all()
+        else:
+            self._set_connected(False)
+
+    def _set_connected(self, connected: bool) -> None:
+        self._connected = connected
+        try:
+            status = self.query_one("#service-status", Static)
+            hint = self.query_one("#hint", Static)
+        except Exception:
+            return
+        contacts = self.query_one(ContactsTable)
+        settings_panel = self.query_one(SettingsPanel)
+        if connected:
+            status.update("Service: Running")
+            hint.update("")
+            contacts.disabled = False
+            settings_panel.disabled = False
+        else:
+            status.update("Service: Stopped")
+            hint.update("run: textforme install")
+            contacts.disabled = True
+            settings_panel.disabled = True
+
+    async def _load_all(self) -> None:
+        try:
+            await self.client.request("status")
+            contacts_result = await self.client.request("contacts.list")
+            settings_result = await self.client.request("settings.get")
+        except RuntimeError:
+            self._set_connected(False)
+            return
+        self._set_connected(True)
+        self.query_one(ContactsTable).load(contacts_result.get("contacts", []))
+        self.query_one(SettingsPanel).load(settings_result.get("settings", {}), has_api_key())
+
+    async def on_contacts_table_toggled(self, message: ContactsTable.Toggled) -> None:
+        message.stop()
+        try:
+            await self.client.request(
+                "contacts.set_ai", {"chat_guid": message.chat_guid, "enabled": message.enabled}
+            )
+        except RuntimeError as exc:
+            code = str(exc)
+            self.query_one(ContactsTable).mark(message.chat_guid, not message.enabled)
+            if code == "GROUP_FORBIDDEN":
+                self.notify("Group chats cannot have AI enabled.", severity="warning")
+            else:
+                self.notify(f"Could not update contact: {code}", severity="error")
+            if code in _CONNECTION_ERRORS:
+                self._set_connected(False)
+
+    async def on_settings_panel_changed(self, message: SettingsPanel.Changed) -> None:
+        message.stop()
+        try:
+            await self.client.request("settings.set", {"key": message.key, "value": message.value})
+            settings_result = await self.client.request("settings.get")
+        except RuntimeError as exc:
+            code = str(exc)
+            self.notify(f"Could not save setting: {code}", severity="error")
+            if code in _CONNECTION_ERRORS:
+                self._set_connected(False)
+            return
+        self.query_one(SettingsPanel).load(settings_result.get("settings", {}), has_api_key())
+
+    def action_save(self) -> None:
+        # Edits already apply immediately via settings.set / contacts.set_ai;
+        # 'S' just gives explicit confirmation per the PRD footer contract.
+        if self._connected:
+            self.notify("All changes are saved.", severity="information")
+        else:
+            self.notify("Not connected to the service.", severity="warning")
+
+    async def action_quit(self) -> None:
+        await self.client.close()
+        self.exit()
+
+
+def run_app() -> None:
+    """Blocking entry used by cli.main() after onboarding is complete."""
+    TextForMeApp().run()
