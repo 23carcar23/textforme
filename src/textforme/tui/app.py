@@ -1,8 +1,10 @@
 """Minimal Textual app. Owner: Agent 3.
 
 Layout per PRD §5: header "TextForMe  Service: Running/Stopped", contacts table
-(AI | Contact | Number) with Space toggling, settings panel, footer keys
-(↑/↓ Move, Space Toggle, Tab Settings, S Save, Q Quit).
+(AI | Contact | Number) with Space toggling, settings panel, contact-note box
+(per-contact prompt guidance), footer keys (↑/↓ Move, Space Toggle,
+Tab Settings, S Save, Shift+L Logs, Q Quit). Daemon logs open in a Shift+L
+popup instead of a persistent panel.
 
 MUST NOT display message previews, history, composition, or AI-reply previews.
 
@@ -22,17 +24,19 @@ from typing import Any
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Static
+from textual.widgets import DataTable, Input, Static
 
 from .. import config
 from ..keychain import has_api_key
 from .contacts import ContactsTable
-from .logs import LogPanel
+from .logs import LogModal
 from .settings import ModelPickerModal, SettingsPanel
 
 _CONNECTION_ERRORS = {"NOT_CONNECTED", "CONNECTION_ERROR", "CONNECTION_CLOSED"}
 
-_FOOTER_TEXT = "↑/↓ Move    Space Toggle    Tab Settings    S Save    Q Quit"
+_FOOTER_TEXT = (
+    "↑/↓ Move    Space Toggle    Tab Settings    S Save    Shift+L Logs    Q Quit"
+)
 
 
 class DaemonClient:
@@ -113,6 +117,68 @@ class DaemonClient:
                 pass
 
 
+class ContactNotePanel(Vertical):
+    """Owner-written note about the selected contact.
+
+    The note is saved per contact (daemon `contacts.set_description`) and
+    appended to the AI's system prompt when replying to that contact —
+    e.g. "my very strict mom so be nice to her".
+    """
+
+    DEFAULT_CSS = """
+    ContactNotePanel {
+        border: round $panel;
+    }
+    ContactNotePanel > #note-target {
+        height: 1;
+        padding: 0 1;
+        color: $text-muted;
+    }
+    ContactNotePanel > #note-hint {
+        height: 1;
+        padding: 0 1;
+        color: $text-muted;
+    }
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.border_title = "Contact Note"
+        self.current_guid: str | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Static("Select a contact to add a note.", id="note-target")
+        yield Input(
+            placeholder='e.g. "my very strict mom so be nice to her"',
+            max_length=500,
+            id="note-input",
+            disabled=True,
+        )
+        yield Static("Enter saves. The note is added to the AI prompt for this contact.", id="note-hint")
+
+    def show_contact(self, contact: dict | None) -> None:
+        """Point the note editor at a contact (or clear it for None/groups)."""
+        target = self.query_one("#note-target", Static)
+        note_input = self.query_one("#note-input", Input)
+        if contact is None:
+            self.current_guid = None
+            target.update("Select a contact to add a note.")
+            note_input.value = ""
+            note_input.disabled = True
+            return
+        if contact.get("is_group"):
+            self.current_guid = None
+            name = contact.get("display_name") or contact.get("address") or "(unknown)"
+            target.update(f"{name} — group chats cannot have notes.")
+            note_input.value = ""
+            note_input.disabled = True
+            return
+        self.current_guid = contact["chat_guid"]
+        name = contact.get("display_name") or contact.get("address") or "(unknown)"
+        target.update(f"Note for {name}:")
+        note_input.value = str(contact.get("description") or "")
+        note_input.disabled = False
+
 class _HeaderBar(Horizontal):
     """'TextForMe' left, 'Service: Running/Stopped' right."""
 
@@ -162,18 +228,20 @@ class TextForMeApp(App[None]):
     ContactsTable {
         width: 2fr;
         border: round $panel;
+        scrollbar-size-vertical: 0;
     }
     #right-col {
         width: 3fr;
+        scrollbar-size-vertical: 0;
     }
     SettingsPanel {
         height: 12;
         border: round $panel;
+        scrollbar-size-vertical: 0;
     }
-    LogPanel {
+    ContactNotePanel {
         height: 1fr;
-        border: round $panel;
-        color: $text-muted;
+        scrollbar-size-vertical: 0;
     }
     #hint {
         height: 1;
@@ -191,6 +259,7 @@ class TextForMeApp(App[None]):
     BINDINGS = [
         Binding("q", "quit", "Quit", show=False),
         Binding("s", "save", "Save", show=False),
+        Binding("L", "show_logs", "Logs", show=False),
         Binding("tab", "focus_next", "Settings", show=False),
     ]
 
@@ -207,7 +276,7 @@ class TextForMeApp(App[None]):
             yield ContactsTable(id="contacts")
             with Vertical(id="right-col"):
                 yield SettingsPanel(id="settings")
-                yield LogPanel(id="logs")
+                yield ContactNotePanel(id="contact-note")
         yield Static("", id="hint")
         yield Static(_FOOTER_TEXT, id="footer-bar")
 
@@ -236,16 +305,19 @@ class TextForMeApp(App[None]):
             return
         contacts = self.query_one(ContactsTable)
         settings_panel = self.query_one(SettingsPanel)
+        note_panel = self.query_one(ContactNotePanel)
         if connected:
             status.update("Service: Running")
             hint.update("")
             contacts.disabled = False
             settings_panel.disabled = False
+            note_panel.disabled = False
         else:
             status.update("Service: Stopped")
             hint.update("run: textforme install")
             contacts.disabled = True
             settings_panel.disabled = True
+            note_panel.disabled = True
 
     async def _load_all(self) -> None:
         try:

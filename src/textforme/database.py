@@ -25,6 +25,7 @@ class ContactRecord:
     is_group: bool
     ai_enabled: bool
     last_seen_message_guid: str | None = None
+    description: str = ""
 
 
 class Database:
@@ -91,6 +92,12 @@ class Database:
                         key   TEXT PRIMARY KEY,
                         value TEXT NOT NULL
                     )
+                    """,
+                ),
+                (
+                    2,
+                    """
+                    ALTER TABLE contacts ADD COLUMN description TEXT NOT NULL DEFAULT ''
                     """,
                 ),
             ]
@@ -181,75 +188,53 @@ class Database:
             cursor = self._conn.cursor()
             cursor.execute(
                 """SELECT chat_guid, chat_id, display_name, address, service,
-                is_group, ai_enabled, last_seen_message_guid
+                is_group, ai_enabled, last_seen_message_guid, description
                 FROM contacts
                 ORDER BY is_group ASC, display_name COLLATE NOCASE ASC"""
             )
             rows = cursor.fetchall()
 
-        return [
-            ContactRecord(
-                chat_guid=row[0],
-                chat_id=row[1],
-                display_name=row[2],
-                address=row[3],
-                service=row[4],
-                is_group=bool(row[5]),
-                ai_enabled=bool(row[6]),
-                last_seen_message_guid=row[7],
-            )
-            for row in rows
-        ]
+        return [self._row_to_contact(row) for row in rows]
+
+    @staticmethod
+    def _row_to_contact(row: tuple) -> ContactRecord:
+        return ContactRecord(
+            chat_guid=row[0],
+            chat_id=row[1],
+            display_name=row[2],
+            address=row[3],
+            service=row[4],
+            is_group=bool(row[5]),
+            ai_enabled=bool(row[6]),
+            last_seen_message_guid=row[7],
+            description=row[8] or "",
+        )
 
     def get_contact_by_chat_id(self, chat_id: int) -> ContactRecord | None:
         with self._lock:
             cursor = self._conn.cursor()
             cursor.execute(
                 """SELECT chat_guid, chat_id, display_name, address, service,
-                is_group, ai_enabled, last_seen_message_guid
+                is_group, ai_enabled, last_seen_message_guid, description
                 FROM contacts WHERE chat_id = ?""",
                 (chat_id,),
             )
             row = cursor.fetchone()
 
-        if not row:
-            return None
-
-        return ContactRecord(
-            chat_guid=row[0],
-            chat_id=row[1],
-            display_name=row[2],
-            address=row[3],
-            service=row[4],
-            is_group=bool(row[5]),
-            ai_enabled=bool(row[6]),
-            last_seen_message_guid=row[7],
-        )
+        return self._row_to_contact(row) if row else None
 
     def get_contact(self, chat_guid: str) -> ContactRecord | None:
         with self._lock:
             cursor = self._conn.cursor()
             cursor.execute(
                 """SELECT chat_guid, chat_id, display_name, address, service,
-                is_group, ai_enabled, last_seen_message_guid
+                is_group, ai_enabled, last_seen_message_guid, description
                 FROM contacts WHERE chat_guid = ?""",
                 (chat_guid,),
             )
             row = cursor.fetchone()
 
-        if not row:
-            return None
-
-        return ContactRecord(
-            chat_guid=row[0],
-            chat_id=row[1],
-            display_name=row[2],
-            address=row[3],
-            service=row[4],
-            is_group=bool(row[5]),
-            ai_enabled=bool(row[6]),
-            last_seen_message_guid=row[7],
-        )
+        return self._row_to_contact(row) if row else None
 
     def set_contact_ai(self, chat_guid: str, enabled: bool) -> None:
         """Raises ValueError('GROUP_FORBIDDEN') for group chats; KeyError if unknown."""
@@ -267,6 +252,19 @@ class Database:
             cursor.execute(
                 "UPDATE contacts SET ai_enabled = ? WHERE chat_guid = ?",
                 (1 if enabled else 0, chat_guid),
+            )
+            self._conn.commit()
+
+    def set_contact_description(self, chat_guid: str, description: str) -> None:
+        """Raises KeyError if the contact is unknown."""
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("SELECT 1 FROM contacts WHERE chat_guid = ?", (chat_guid,))
+            if cursor.fetchone() is None:
+                raise KeyError(f"Unknown contact: {chat_guid}")
+            cursor.execute(
+                "UPDATE contacts SET description = ? WHERE chat_guid = ?",
+                (description, chat_guid),
             )
             self._conn.commit()
 

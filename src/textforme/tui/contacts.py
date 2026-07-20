@@ -103,6 +103,21 @@ class ContactsTable(DataTable):
             Text(str(number)),
         )
 
+    def contact(self, chat_guid: str) -> dict | None:
+        """The stored contact dict for a row, or None if unknown."""
+        return self._meta.get(chat_guid)
+
+    def cursor_contact(self) -> dict | None:
+        """The contact dict for the row under the cursor, or None."""
+        guid = self._current_guid()
+        return self._meta.get(guid) if guid else None
+
+    def set_description(self, chat_guid: str, description: str) -> None:
+        """Update the locally cached description after a successful save."""
+        meta = self._meta.get(chat_guid)
+        if meta is not None:
+            meta["description"] = description
+
     def mark(self, chat_guid: str, enabled: bool) -> None:
         """Optimistically (or on revert) set the AI cell for a contact."""
         meta = self._meta.get(chat_guid)

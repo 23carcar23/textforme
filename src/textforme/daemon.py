@@ -510,6 +510,19 @@ class Daemon:
                 raise _SocketError("BAD_PARAMS", f"unknown contact: {chat_guid}") from exc
             return {}
 
+        if method == "contacts.set_description":
+            chat_guid = params.get("chat_guid")
+            description = params.get("description")
+            if not isinstance(chat_guid, str) or not isinstance(description, str):
+                raise _SocketError("BAD_PARAMS", "chat_guid (str) and description (str) are required")
+            if len(description) > 500:
+                raise _SocketError("BAD_PARAMS", "description must be 500 characters or fewer")
+            try:
+                database.set_contact_description(chat_guid, description)
+            except KeyError as exc:
+                raise _SocketError("BAD_PARAMS", f"unknown contact: {chat_guid}") from exc
+            return {}
+
         if method == "contacts.refresh":
             count = await self._sync_contacts()
             return {"count": count}
@@ -580,6 +593,7 @@ class Daemon:
             "service": contact.service,
             "is_group": contact.is_group,
             "ai_enabled": contact.ai_enabled,
+            "description": contact.description,
         }
 
     async def _status(self) -> dict[str, Any]:

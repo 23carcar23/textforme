@@ -1,4 +1,4 @@
-"""Log panel: tails the daemon's log file under the settings panel.
+"""Log viewer: tails the daemon's log file, shown in a Shift+L popup.
 
 The daemon never logs message bodies, reply text, or the API key (only ids,
 statuses, and error codes), so surfacing its log in the TUI leaks nothing.
@@ -11,7 +11,10 @@ from __future__ import annotations
 from collections import deque
 from pathlib import Path
 
-from textual.widgets import Log
+from textual import events
+from textual.containers import Grid
+from textual.screen import ModalScreen
+from textual.widgets import Label, Log
 
 from .. import config
 
@@ -60,3 +63,40 @@ class LogPanel(Log):
             self.write_line("(no log entries yet — logs live in ~/Library/Logs/TextForMe)")
         if was_at_end:
             self.scroll_end(animate=False)
+
+
+class LogModal(ModalScreen[None]):
+    """Popup wrapper around LogPanel, opened with Shift+L from the app."""
+
+    DEFAULT_CSS = """
+    LogModal {
+        align: center middle;
+    }
+    LogModal > Grid {
+        grid-size: 1;
+        grid-rows: auto 1fr auto;
+        width: 90%;
+        height: 80%;
+        border: round $primary;
+        background: $panel;
+        padding: 1 2;
+    }
+    LogModal LogPanel {
+        height: 1fr;
+        color: $text-muted;
+    }
+    LogModal .hint {
+        color: $text-muted;
+    }
+    """
+
+    def compose(self):
+        with Grid():
+            yield Label("Daemon Logs")
+            yield LogPanel()
+            yield Label("Esc to close", classes="hint")
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            event.stop()
+            self.dismiss(None)
