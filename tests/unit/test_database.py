@@ -52,7 +52,7 @@ class TestSchemaAndInit:
         assert count1 == count2
 
     def test_schema_version_set(self, tmp_path: Path) -> None:
-        """Schema version should be set to 1 after initialization."""
+        """Schema version should be at the latest migration after initialization."""
         db_path = tmp_path / "test.db"
         db = Database(db_path)
 
@@ -61,7 +61,7 @@ class TestSchemaAndInit:
         version = cursor.fetchone()
 
         assert version is not None
-        assert version[0] == 1
+        assert version[0] == 2
         db.close()
 
 
@@ -635,4 +635,86 @@ class TestIntegration:
         assert retrieved.ai_enabled is False
         assert db.is_processed("msg1") is True
 
+        db.close()
+
+
+class TestContactDescriptions:
+    """Per-contact owner-written descriptions (schema v2)."""
+
+    def test_description_defaults_empty(self, tmp_path: Path) -> None:
+        db = Database(tmp_path / "test.db")
+        db.upsert_contact(make_contact())
+        retrieved = db.get_contact("test-guid-001")
+        assert retrieved is not None
+        assert retrieved.description == ""
+        db.close()
+
+    def test_set_and_get_description(self, tmp_path: Path) -> None:
+        db = Database(tmp_path / "test.db")
+        db.upsert_contact(make_contact())
+        db.set_contact_description("test-guid-001", "my very strict mom so be nice to her")
+        assert db.get_contact("test-guid-001").description == "my very strict mom so be nice to her"
+        assert db.get_contact_by_chat_id(1).description == "my very strict mom so be nice to her"
+        assert db.list_contacts()[0].description == "my very strict mom so be nice to her"
+        db.close()
+
+    def test_set_description_unknown_contact_raises(self, tmp_path: Path) -> None:
+        db = Database(tmp_path / "test.db")
+        with pytest.raises(KeyError):
+            db.set_contact_description("nope", "hi")
+        db.close()
+
+    def test_upsert_preserves_description(self, tmp_path: Path) -> None:
+        """Contact re-sync must never wipe an owner-written description."""
+        db = Database(tmp_path / "test.db")
+        db.upsert_contact(make_contact())
+        db.set_contact_description("test-guid-001", "be nice")
+        db.upsert_contact(make_contact(display_name="Renamed"))
+        retrieved = db.get_contact("test-guid-001")
+        assert retrieved.display_name == "Renamed"
+        assert retrieved.description == "be nice"
+        db.close()
+
+    def test_migration_from_v1_adds_description_column(self, tmp_path: Path) -> None:
+        """A v1 database (no description column) migrates cleanly on open."""
+        import sqlite3
+
+        path = tmp_path / "old.db"
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            """
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version (version) VALUES (1);
+            CREATE TABLE contacts (
+                chat_guid   TEXT PRIMARY KEY,
+                chat_id     INTEGER NOT NULL,
+                display_name TEXT NOT NULL DEFAULT '',
+                address     TEXT NOT NULL DEFAULT '',
+                service     TEXT NOT NULL DEFAULT 'iMessage',
+                is_group    INTEGER NOT NULL DEFAULT 0,
+                ai_enabled  INTEGER NOT NULL DEFAULT 0,
+                last_seen_message_guid TEXT,
+                updated_at  TEXT NOT NULL
+            );
+            CREATE TABLE processed_messages (
+                message_guid TEXT PRIMARY KEY,
+                chat_guid    TEXT NOT NULL,
+                received_at  TEXT NOT NULL,
+                status       TEXT NOT NULL,
+                error_code   TEXT,
+                reply_sent_at TEXT
+            );
+            CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO contacts VALUES ('c1', 1, 'Bob', '+1', 'iMessage', 0, 1, NULL, '2026-01-01T00:00:00+00:00');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        db = Database(path)
+        retrieved = db.get_contact("c1")
+        assert retrieved is not None
+        assert retrieved.description == ""
+        db.set_contact_description("c1", "old friend")
+        assert db.get_contact("c1").description == "old friend"
         db.close()

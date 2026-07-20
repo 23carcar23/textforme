@@ -200,7 +200,9 @@ class SettingsPanel(DataTable):
         self._api_key_configured = api_key_configured
         for key, _label in SETTINGS_ROWS:
             try:
-                self.update_cell(key, "value", self._display_value(key))
+                # update_width=True so long values (e.g. the full model id)
+                # widen the column instead of being truncated.
+                self.update_cell(key, "value", self._display_value(key), update_width=True)
             except Exception:
                 pass
 

@@ -225,3 +225,26 @@ def test_build_request_empty_history_only_incoming():
     system, messages = build_request("Bob", [], incoming, max_reply_chars=200)
 
     assert messages == [{"role": "user", "content": "hello there"}]
+
+
+# -- build_request: owner-written contact description ---------------------------
+
+
+def test_build_request_appends_contact_description():
+    incoming = make_message("g1", "hello", is_from_me=False)
+    system, _ = build_request(
+        "Bob", [], incoming, max_reply_chars=200,
+        contact_description="my very strict mom so be nice to her",
+    )
+    assert "my very strict mom so be nice to her" in system
+    assert "note" in system.lower()
+
+
+def test_build_request_omits_description_section_when_empty():
+    incoming = make_message("g1", "hello", is_from_me=False)
+    system_default, _ = build_request("Bob", [], incoming, max_reply_chars=200)
+    system_empty, _ = build_request(
+        "Bob", [], incoming, max_reply_chars=200, contact_description=""
+    )
+    assert system_default == system_empty
+    assert "owner has left this note" not in system_default

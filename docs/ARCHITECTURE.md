@@ -97,9 +97,14 @@ Methods:
 - `status` → `{running:true, imsg_ok:bool, global_ai_enabled:bool, paused:bool,
    model_id:str, replies_last_hour:int, last_error:str|null}`
 - `contacts.list` → `{contacts:[{chat_guid, chat_id, display_name, address,
-   service, is_group, ai_enabled}]}` (groups included but toggling them is rejected)
+   service, is_group, ai_enabled, description}]}` (groups included but toggling
+   them is rejected)
 - `contacts.set_ai` params `{chat_guid, enabled}` → `{}`; error code `GROUP_FORBIDDEN`
   for group chats.
+- `contacts.set_description` params `{chat_guid, description}` → `{}`; the
+  owner-written note about a contact (≤500 chars) appended to the system prompt
+  when replying to that contact. `BAD_PARAMS` for unknown contacts or oversized
+  values.
 - `contacts.refresh` → re-sync contacts from imsg → `{count:int}`
 - `settings.get` → `{settings:{...all keys...}}`
 - `models.list` → `{models:[{model_id, display_name}]}` — live Anthropic Models

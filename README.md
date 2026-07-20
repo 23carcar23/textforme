@@ -98,16 +98,21 @@ textforme
 
 The app is a single screen: a header showing the service status
 ("Service: Running/Stopped"), the contacts table (AI | Contact | Number),
-and on the right the settings panel with a live tail of the daemon log
-beneath it (refreshed every 2 seconds; the log never contains message
-content, only ids, statuses, and error codes).
+and on the right the settings panel with the contact-note box beneath it.
+The note box holds an optional description of the selected contact (e.g.
+"my very strict mom so be nice to her"); press Enter to save it, and it is
+added to the AI's prompt whenever it replies to that contact.
 
 **Key commands**:
 - **↑/↓**: Move within the focused table.
 - **Space**: Toggle the selected contact's auto-reply on/off (saved immediately).
-- **Tab**: Switch focus between the contacts table and the settings panel.
+- **Tab**: Switch focus between the contacts table, settings panel, and note box.
 - **Enter** (in Settings): Cycle a setting's value, or open the quiet-hours prompt.
+- **Enter** (in the note box): Save the selected contact's description.
 - **S**: Save (settings changes are also applied immediately as you make them).
+- **Shift+L**: Open the daemon log popup (refreshed every 2 seconds; the log
+  never contains message content, only ids, statuses, and error codes).
+  Esc closes it.
 - **Q**: Quit the TUI (the daemon keeps running in the background).
 
 Group chats are shown dimmed and cannot be toggled. Pressing Enter on the

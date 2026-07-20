@@ -177,3 +177,53 @@ async def test_settings_set_rejects_uncoercible_numeric_value(daemon_harness_fac
     assert row["status"] == "replied"
 
     await client.close()
+
+
+# -- contact descriptions over the socket ---------------------------------------
+
+
+async def test_set_description_via_socket_reaches_system_prompt(daemon_harness_factory):
+    harness = await daemon_harness_factory(
+        contacts=[make_contact(chat_guid="c1", chat_id=1, ai_enabled=True)],
+        settings={"selected_model_id": "claude-test"},
+    )
+    client = harness.client()
+
+    result = await client.request(
+        "contacts.set_description",
+        {"chat_guid": "c1", "description": "my very strict mom so be nice to her"},
+    )
+    assert result == {}
+
+    listed = await client.request("contacts.list")
+    by_guid = {c["chat_guid"]: c for c in listed["contacts"]}
+    assert by_guid["c1"]["description"] == "my very strict mom so be nice to her"
+
+    await harness.imsg.push(make_message(rowid=1, guid="g1", chat_id=1, text="hi mom's phone"))
+    row = await wait_for_processed(harness.database, "g1")
+    assert row["status"] == "replied"
+    assert "my very strict mom so be nice to her" in harness.anthropic.calls[0]["system"]
+
+    await client.close()
+
+
+async def test_set_description_validation_errors(daemon_harness_factory):
+    harness = await daemon_harness_factory(
+        contacts=[make_contact(chat_guid="c1", chat_id=1)],
+        settings={"selected_model_id": "claude-test"},
+    )
+    client = harness.client()
+
+    with pytest.raises(RuntimeError, match="BAD_PARAMS"):
+        await client.request("contacts.set_description", {"chat_guid": "missing", "description": "x"})
+    with pytest.raises(RuntimeError, match="BAD_PARAMS"):
+        await client.request("contacts.set_description", {"chat_guid": "c1", "description": "x" * 501})
+    with pytest.raises(RuntimeError, match="BAD_PARAMS"):
+        await client.request("contacts.set_description", {"chat_guid": "c1"})
+
+    # A valid save still works afterwards.
+    assert await client.request(
+        "contacts.set_description", {"chat_guid": "c1", "description": "likes fishing"}
+    ) == {}
+
+    await client.close()

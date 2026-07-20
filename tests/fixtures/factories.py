@@ -16,6 +16,7 @@ def make_contact(
     is_group: bool = False,
     ai_enabled: bool = True,
     last_seen_message_guid: str | None = None,
+    description: str = "",
     **kwargs: object,
 ) -> ContactRecord:
     """Create a ContactRecord with sensible defaults."""
@@ -34,6 +35,7 @@ def make_contact(
         is_group=is_group,
         ai_enabled=ai_enabled,
         last_seen_message_guid=last_seen_message_guid,
+        description=description,
     )
 
 
