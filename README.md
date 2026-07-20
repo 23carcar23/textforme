@@ -115,11 +115,16 @@ added to the AI's prompt whenever it replies to that contact.
   Esc closes it.
 - **Q**: Quit the TUI (the daemon keeps running in the background).
 
-Group chats are shown dimmed and cannot be toggled. Pressing Enter on the
-Anthropic Model row opens a picker fed live from Anthropic's Models API
-(via the daemon) — switch models any time without re-running onboarding;
-the change applies to the next reply. The API key row stays read-only;
-replace the key by re-running onboarding.
+Group chats are shown dimmed and cannot be toggled. The Anthropic Model row
+shows the display name of the selected model and can be changed two ways,
+both fed live from Anthropic's Models API via the daemon and applied to the
+next reply — no onboarding re-run needed:
+- **←/→** on the row cycles directly through the available models.
+- **Enter** opens a picker window: move with ↑/↓, mark a model with Enter,
+  then close the window (Esc) to confirm — or close without selecting to
+  keep the current model.
+
+The API key row stays read-only; replace the key by re-running onboarding.
 
 ### Configuration (Settings Tab)
 

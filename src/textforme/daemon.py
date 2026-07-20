@@ -348,6 +348,7 @@ class Daemon:
                     msg,
                     settings.selected_model_id,
                     settings.maximum_reply_length,
+                    style_profile=settings.style_profile,
                 )
             except AnthropicUnavailableError as exc:
                 detail = str(exc)

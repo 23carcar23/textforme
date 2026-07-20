@@ -130,17 +130,25 @@ class ModelPickerModal(ModalScreen[str | None]):
         super().__init__()
         self._models = models
         self._current_id = current_id
+        self._chosen: str | None = None
+        self._names = {m["model_id"]: m["display_name"] for m in models}
 
     def compose(self):
         with Grid():
-            yield Label("Choose the Claude model (↑/↓ cycle, Enter select, Esc cancel):")
+            yield Label("Choose the Claude model (↑/↓ move, Enter select, Esc close):")
             yield OptionList(
                 *[
                     Option(f"{m['display_name']}  ({m['model_id']})", id=m["model_id"])
                     for m in self._models
                 ]
             )
-            yield Label("Takes effect immediately for new replies.", classes="hint")
+            yield Label(self._status_text(), id="picker-status", classes="hint")
+
+    def _status_text(self) -> str:
+        if self._chosen is None:
+            current = self._names.get(self._current_id) or self._current_id or "(unset)"
+            return f"Current: {current} — select a model, then close (Esc) to apply."
+        return f"Selected: {self._names.get(self._chosen, self._chosen)} — close (Esc) to apply."
 
     def on_mount(self) -> None:
         option_list = self.query_one(OptionList)
@@ -151,13 +159,16 @@ class ModelPickerModal(ModalScreen[str | None]):
                 break
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        # Selection does NOT close the window; the choice is applied when the
+        # user closes it (Esc), so they can browse without committing.
         event.stop()
-        self.dismiss(event.option.id)
+        self._chosen = event.option.id
+        self.query_one("#picker-status", Label).update(self._status_text())
 
     def on_key(self, event: events.Key) -> None:
         if event.key == "escape":
             event.stop()
-            self.dismiss(None)
+            self.dismiss(self._chosen)
 
 
 class SettingsPanel(DataTable):
@@ -174,10 +185,18 @@ class SettingsPanel(DataTable):
     class ModelPickRequested(Message):
         """Posted when the user activates the Anthropic Model row."""
 
+    class ModelCycleRequested(Message):
+        """Posted when the user presses ←/→ on the Anthropic Model row."""
+
+        def __init__(self, delta: int) -> None:
+            self.delta = delta
+            super().__init__()
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(cursor_type="row", zebra_stripes=True, **kwargs)
         self._settings: dict[str, str] = {}
         self._api_key_configured = False
+        self._model_names: dict[str, str] = {}
         self._columns_built = False
         self._rows_built = False
 
@@ -194,14 +213,24 @@ class SettingsPanel(DataTable):
                 self.add_row(label, "", key=key)
             self._rows_built = True
 
-    def load(self, settings: dict[str, str], api_key_configured: bool) -> None:
+    def load(
+        self,
+        settings: dict[str, str],
+        api_key_configured: bool,
+        model_names: dict[str, str] | None = None,
+    ) -> None:
+        """model_names maps model_id -> display_name; None keeps the last map
+        (so a transient models.list failure doesn't blank the model name)."""
         self._ensure_built()
         self._settings = dict(settings)
         self._api_key_configured = api_key_configured
+        if model_names is not None:
+            self._model_names = dict(model_names)
         for key, _label in SETTINGS_ROWS:
             try:
-                # update_width=True so long values (e.g. the full model id)
-                # widen the column instead of being truncated.
+                # update_width=True: the column starts sized to the empty
+                # placeholder rows, so without it every value renders
+                # truncated to the header's width ("Value" -> 5 chars).
                 self.update_cell(key, "value", self._display_value(key), update_width=True)
             except Exception:
                 pass
@@ -220,8 +249,24 @@ class SettingsPanel(DataTable):
         if key == "global_ai_enabled":
             return "ON" if self._settings.get("global_ai_enabled") == "true" else "OFF"
         if key == "selected_model_id":
-            return self._settings.get("selected_model_id") or "(unset)"
+            model_id = self._settings.get("selected_model_id", "")
+            return self._model_names.get(model_id) or model_id or "(unset)"
         return self._settings.get(key, "")
+
+    def _cursor_row_key(self) -> str | None:
+        if not self.row_count or self.cursor_row is None:
+            return None
+        try:
+            row_key, _ = self.coordinate_to_cell_key(self.cursor_coordinate)
+        except Exception:
+            return None
+        return row_key.value
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key in ("left", "right") and self._cursor_row_key() == "selected_model_id":
+            event.stop()
+            event.prevent_default()
+            self.post_message(self.ModelCycleRequested(1 if event.key == "right" else -1))
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         event.stop()

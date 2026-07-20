@@ -34,6 +34,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "failure_pause_threshold": "5",
     "last_seen_rowid": "0",
     "onboarding_complete": "false",
+    "style_profile": "",  # description of the owner's texting style, added to the system prompt
 }
 
 
@@ -58,6 +59,7 @@ class Settings:
     failure_pause_threshold: int = 5
     last_seen_rowid: int = 0
     onboarding_complete: bool = False
+    style_profile: str = ""
 
     @classmethod
     def from_mapping(cls, raw: dict[str, str]) -> "Settings":
@@ -76,6 +78,7 @@ class Settings:
             failure_pause_threshold=int(merged["failure_pause_threshold"] or 5),
             last_seen_rowid=int(merged["last_seen_rowid"] or 0),
             onboarding_complete=_to_bool(merged["onboarding_complete"]),
+            style_profile=merged["style_profile"],
         )
 
     def to_mapping(self) -> dict[str, str]:
@@ -93,6 +96,7 @@ class Settings:
             "failure_pause_threshold": str(self.failure_pause_threshold),
             "last_seen_rowid": str(self.last_seen_rowid),
             "onboarding_complete": str(self.onboarding_complete).lower(),
+            "style_profile": self.style_profile,
         }
 
 

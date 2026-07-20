@@ -227,24 +227,25 @@ def test_build_request_empty_history_only_incoming():
     assert messages == [{"role": "user", "content": "hello there"}]
 
 
-# -- build_request: owner-written contact description ---------------------------
+# -- style profile ---------------------------------------------------------------
 
 
-def test_build_request_appends_contact_description():
-    incoming = make_message("g1", "hello", is_from_me=False)
-    system, _ = build_request(
-        "Bob", [], incoming, max_reply_chars=200,
-        contact_description="my very strict mom so be nice to her",
+def test_style_profile_appended_to_system_prompt():
+    from tests.fixtures.factories import make_message
+    incoming = make_message(guid="g1", text="hey", is_from_me=False)
+    system, _ = __import__("textforme.anthropic.prompts", fromlist=["build_request"]).build_request(
+        "Alex", [], incoming, 300, style_profile="lowercase, brief, uses 'lol'"
     )
-    assert "my very strict mom so be nice to her" in system
-    assert "note" in system.lower()
+    assert "lowercase, brief, uses 'lol'" in system
+    # Safety rules must be declared to take precedence over the style guide.
+    assert "takes precedence" in system
 
 
-def test_build_request_omits_description_section_when_empty():
-    incoming = make_message("g1", "hello", is_from_me=False)
-    system_default, _ = build_request("Bob", [], incoming, max_reply_chars=200)
-    system_empty, _ = build_request(
-        "Bob", [], incoming, max_reply_chars=200, contact_description=""
-    )
-    assert system_default == system_empty
-    assert "owner has left this note" not in system_default
+def test_empty_style_profile_leaves_prompt_unchanged():
+    from textforme.anthropic.prompts import build_request
+    from tests.fixtures.factories import make_message
+    incoming = make_message(guid="g1", text="hey", is_from_me=False)
+    with_style, _ = build_request("Alex", [], incoming, 300, style_profile="   ")
+    without, _ = build_request("Alex", [], incoming, 300)
+    assert with_style == without
+    assert "personal style" not in without
