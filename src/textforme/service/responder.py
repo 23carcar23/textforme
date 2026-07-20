@@ -24,6 +24,7 @@ class AnthropicResponder:
         incoming_message: Message,
         model_id: str,
         max_reply_chars: int,
+        style_profile: str = "",
     ) -> str:
         """Build prompt (anthropic.prompts), call complete(), validate_reply().
         max_tokens derived from max_reply_chars (~1 token/3 chars, min 64).
@@ -37,6 +38,7 @@ class AnthropicResponder:
             recent_messages=recent_messages,
             incoming_message=incoming_message,
             max_reply_chars=max_reply_chars,
+            style_profile=style_profile,
         )
 
         max_tokens = max(64, max_reply_chars // 3)
