@@ -2,17 +2,11 @@ import React, { useEffect, useState } from 'react'
 import { call } from '../bridge.js'
 
 const CHOICES = {
-  maximum_reply_length: ['150', '300', '600'],
-  response_delay_seconds: ['0', '3', '10', '30'],
-  context_message_limit: ['5', '10', '25'],
-  global_rate_limit_per_hour: ['10', '20', '60'],
+  context_message_limit: ['5', '10', '25', '50', 'unlimited'],
 }
 
 const LABELS = {
-  maximum_reply_length: 'Reply length (chars)',
-  response_delay_seconds: 'Response delay (s)',
   context_message_limit: 'Context messages',
-  global_rate_limit_per_hour: 'Rate limit (per hour)',
 }
 
 function isTrue(v) {
@@ -25,7 +19,6 @@ function withCurrent(choices, current) {
 
 export default function SettingsPanel({ settings, hasApiKey, disabled, onChange, onSaveApiKey }) {
   const [models, setModels] = useState(null)
-  const [quietDraft, setQuietDraft] = useState(null) // null = not editing
   const [keyEditing, setKeyEditing] = useState(false)
   const [keyDraft, setKeyDraft] = useState('')
   const [keyError, setKeyError] = useState('')
@@ -40,10 +33,6 @@ export default function SettingsPanel({ settings, hasApiKey, disabled, onChange,
   }, [disabled, hasApiKey])
 
   const aiOn = isTrue(settings.global_ai_enabled)
-  const quietValue =
-    settings.quiet_hours_start && settings.quiet_hours_end
-      ? `${settings.quiet_hours_start}-${settings.quiet_hours_end}`
-      : ''
 
   async function submitKey() {
     const key = keyDraft.trim()
@@ -60,16 +49,6 @@ export default function SettingsPanel({ settings, hasApiKey, disabled, onChange,
           : 'Could not save the key to the Keychain.'
       )
     }
-  }
-
-  function commitQuietHours() {
-    const raw = (quietDraft ?? '').trim()
-    setQuietDraft(null)
-    if (raw === quietValue) return
-    const match = raw === '' ? ['', '', ''] : raw.match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/)
-    if (!match) return
-    onChange('quiet_hours_start', raw === '' ? '' : match[1])
-    onChange('quiet_hours_end', raw === '' ? '' : match[2])
   }
 
   return (
@@ -95,13 +74,13 @@ export default function SettingsPanel({ settings, hasApiKey, disabled, onChange,
             disabled={disabled}
             onChange={(e) => onChange('selected_model_id', e.target.value)}
           >
-            {!models.some((m) => m.id === settings.selected_model_id) && (
+            {!models.some((m) => m.model_id === settings.selected_model_id) && (
               <option value={settings.selected_model_id ?? ''}>
                 {settings.selected_model_id || '(not set)'}
               </option>
             )}
             {models.map((m) => (
-              <option key={m.id} value={m.id}>{m.display_name || m.id}</option>
+              <option key={m.model_id} value={m.model_id}>{m.display_name || m.model_id}</option>
             ))}
           </select>
         ) : (
@@ -171,20 +150,6 @@ export default function SettingsPanel({ settings, hasApiKey, disabled, onChange,
           </select>
         </div>
       ))}
-
-      <div className="setting-row">
-        <label htmlFor="quiet-hours">Quiet hours</label>
-        <input
-          id="quiet-hours"
-          type="text"
-          placeholder="22:00-08:00 or blank"
-          value={quietDraft ?? quietValue}
-          disabled={disabled}
-          onChange={(e) => setQuietDraft(e.target.value)}
-          onBlur={commitQuietHours}
-          onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
-        />
-      </div>
     </div>
   )
 }

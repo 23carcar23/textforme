@@ -24,12 +24,21 @@ class ContactsTable(DataTable):
 
     BINDINGS = [
         Binding("space", "toggle_ai", "Toggle", show=True),
+        Binding("t", "toggle_timer", "Timer", show=True),
         Binding("up", "cursor_up", "Move", show=True),
         Binding("down", "cursor_down", "Move", show=True),
     ]
 
     class Toggled(Message):
         """Posted when the user requests an AI toggle for a non-group contact."""
+
+        def __init__(self, chat_guid: str, enabled: bool) -> None:
+            self.chat_guid = chat_guid
+            self.enabled = enabled
+            super().__init__()
+
+    class TimerToggled(Message):
+        """Posted when the user toggles the reply timer for a non-group contact."""
 
         def __init__(self, chat_guid: str, enabled: bool) -> None:
             self.chat_guid = chat_guid
@@ -48,6 +57,7 @@ class ContactsTable(DataTable):
         if self._columns_built:
             return
         self.add_column("AI", key="ai", width=5)
+        self.add_column("Timer", key="timer", width=7)
         self.add_column("Contact", key="contact")
         self.add_column("Number", key="number")
         self._columns_built = True
@@ -85,20 +95,34 @@ class ContactsTable(DataTable):
                 return
 
     @staticmethod
-    def _render_row(contact: dict) -> tuple[Text, Text, Text]:
+    def _format_remaining(seconds: float) -> str:
+        total = max(0, int(seconds + 0.999))
+        return f"{total // 60}:{total % 60:02d}"
+
+    @classmethod
+    def _render_row(cls, contact: dict) -> tuple[Text, Text, Text, Text]:
         is_group = bool(contact.get("is_group"))
         name = contact.get("display_name") or contact.get("address") or "(unknown)"
         number = contact.get("address", "")
         if is_group:
             return (
                 Text("--", style="dim"),
+                Text("--", style="dim"),
                 Text(f"{name} (group)", style="dim"),
                 Text(number, style="dim"),
             )
         enabled = bool(contact.get("ai_enabled"))
         ai_style = "bold green" if enabled else "grey58"
+        remaining = contact.get("reply_timer_remaining")
+        if remaining is not None:
+            timer_cell = Text(cls._format_remaining(remaining), style="bold yellow")
+        elif contact.get("reply_timer_enabled"):
+            timer_cell = Text("ON", style="yellow")
+        else:
+            timer_cell = Text("OFF", style="grey58")
         return (
             Text("ON" if enabled else "OFF", style=ai_style),
+            timer_cell,
             Text(str(name)),
             Text(str(number)),
         )
@@ -130,6 +154,18 @@ class ContactsTable(DataTable):
         except Exception:
             pass
 
+    def mark_timer(self, chat_guid: str, enabled: bool) -> None:
+        """Optimistically (or on revert) set the reply-timer cell for a contact."""
+        meta = self._meta.get(chat_guid)
+        if meta is None:
+            return
+        meta["reply_timer_enabled"] = enabled
+        cells = self._render_row(meta)
+        try:
+            self.update_cell(chat_guid, "timer", cells[1])
+        except Exception:
+            pass
+
     def action_toggle_ai(self) -> None:
         if not self.row_count or self.cursor_row is None:
             return
@@ -149,3 +185,23 @@ class ContactsTable(DataTable):
         new_enabled = not bool(meta.get("ai_enabled"))
         self.mark(guid, new_enabled)  # optimistic update
         self.post_message(self.Toggled(guid, new_enabled))
+
+    def action_toggle_timer(self) -> None:
+        if not self.row_count or self.cursor_row is None:
+            return
+        try:
+            row_key, _ = self.coordinate_to_cell_key(self.cursor_coordinate)
+        except Exception:
+            return
+        guid = row_key.value
+        if guid is None:
+            return
+        meta = self._meta.get(guid)
+        if meta is None:
+            return
+        if meta.get("is_group"):
+            self.notify("Group chats cannot use a reply timer.", severity="warning")
+            return
+        new_enabled = not bool(meta.get("reply_timer_enabled"))
+        self.mark_timer(guid, new_enabled)  # optimistic update
+        self.post_message(self.TimerToggled(guid, new_enabled))

@@ -55,9 +55,6 @@ class SkipReason(StrEnum):
     GLOBAL_OFF = "global_off"
     CONTACT_OFF = "contact_off"
     UNKNOWN_CONTACT = "unknown_contact"
-    QUIET_HOURS = "quiet_hours"
-    COOLDOWN = "cooldown"
-    RATE_LIMIT = "rate_limit"
     AUTO_PAUSED = "auto_paused"
 
 

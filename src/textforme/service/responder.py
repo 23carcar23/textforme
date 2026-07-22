@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from ..anthropic.client import AnthropicClient
 from ..anthropic.prompts import build_request
-from ..config import MAX_CONTACT_NOTE_CHARS, MAX_PROMPT_CHARS
+from ..config import MAX_CONTACT_NOTE_CHARS, MAX_PROMPT_CHARS, MAX_REPLY_CHARS
 from ..database import ContactRecord
 from ..messaging.models import Message
 from .policies import validate_reply
@@ -31,7 +31,7 @@ class AnthropicResponder:
         recent_messages: list[Message],
         incoming_message: Message,
         model_id: str,
-        max_reply_chars: int,
+        max_reply_chars: int = MAX_REPLY_CHARS,
         system_prompt: str = "",
         persona_prompt: str = "",
         style_profile: str = "",

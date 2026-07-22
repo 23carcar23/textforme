@@ -41,22 +41,29 @@ async def test_enable_contact_via_socket_then_message_gets_reply(daemon_harness_
     await client.close()
 
 
-async def test_disable_mid_response_delay_aborts_send(daemon_harness_factory):
+async def test_disable_during_reply_timer_window_aborts_send(daemon_harness_factory, monkeypatch):
+    """When the reply timer is on, disabling the contact before the countdown
+    fires must abort the batched send: _fire_reply re-checks policy."""
+    import textforme.daemon as daemon_module
+
+    # A short-but-nonzero countdown gives the socket call time to flip the
+    # contact off before the timer fires.
+    monkeypatch.setattr(daemon_module.random, "uniform", lambda a, b: 0.4)
     harness = await daemon_harness_factory(
         contacts=[make_contact(chat_guid="c1", chat_id=1, ai_enabled=True)],
-        settings={"selected_model_id": "claude-test", "response_delay_seconds": "1"},
+        settings={"selected_model_id": "claude-test"},
     )
+    harness.database.set_contact_reply_timer("c1", True)
     client = harness.client()
 
     await harness.imsg.push(make_message(rowid=1, guid="g1", chat_id=1, text="hi"))
-    # The daemon is now inside its 1s response_delay sleep for this message;
-    # flip the contact off before the delay elapses.
+    # The countdown is now running for this chat; flip the contact off first.
     await asyncio.sleep(0.1)
     result = await client.request("contacts.set_ai", {"chat_guid": "c1", "enabled": False})
     assert result == {}
 
-    row = await wait_for_processed(harness.database, "g1", timeout=3.0)
-    assert row["status"] == "skipped:contact_off"
+    # Give the timer time to fire and re-check policy.
+    await asyncio.sleep(0.6)
     assert harness.imsg.sent_messages == []
     assert harness.anthropic.calls == []
 
@@ -133,13 +140,20 @@ async def test_tui_daemon_client_full_round_trip(daemon_harness_factory):
     contacts_after = await client.request("contacts.list")
     alice_after = next(c for c in contacts_after["contacts"] if c["chat_guid"] == "c1")
     assert alice_after["ai_enabled"] is True
+    assert alice_after["reply_timer_enabled"] is False
+
+    # Toggle the realistic-texting reply timer over the socket.
+    await client.request("contacts.set_reply_timer", {"chat_guid": "c1", "enabled": True})
+    contacts_timer = await client.request("contacts.list")
+    alice_timer = next(c for c in contacts_timer["contacts"] if c["chat_guid"] == "c1")
+    assert alice_timer["reply_timer_enabled"] is True
 
     settings_before = await client.request("settings.get")
-    assert settings_before["settings"]["maximum_reply_length"] == "300"
+    assert settings_before["settings"]["context_message_limit"] == "10"
 
-    await client.request("settings.set", {"key": "maximum_reply_length", "value": "150"})
+    await client.request("settings.set", {"key": "context_message_limit", "value": "25"})
     settings_after = await client.request("settings.get")
-    assert settings_after["settings"]["maximum_reply_length"] == "150"
+    assert settings_after["settings"]["context_message_limit"] == "25"
 
     with pytest.raises(RuntimeError, match="UNKNOWN_KEY"):
         await client.request("settings.set", {"key": "not_a_real_setting", "value": "x"})
@@ -158,18 +172,18 @@ async def test_settings_set_rejects_uncoercible_numeric_value(daemon_harness_fac
     client = harness.client()
 
     with pytest.raises(RuntimeError, match="BAD_PARAMS"):
-        await client.request("settings.set", {"key": "maximum_reply_length", "value": "abc"})
+        await client.request("settings.set", {"key": "context_message_limit", "value": "abc"})
     with pytest.raises(RuntimeError, match="BAD_PARAMS"):
-        await client.request("settings.set", {"key": "response_delay_seconds", "value": "3s"})
+        await client.request("settings.set", {"key": "failure_pause_threshold", "value": "3x"})
 
     # Value unchanged, settings still readable, daemon still healthy.
     result = await client.request("settings.get")
-    assert result["settings"]["maximum_reply_length"] == "300"
-    assert harness.database.get_settings().maximum_reply_length == 300
+    assert result["settings"]["context_message_limit"] == "10"
+    assert harness.database.get_settings().context_message_limit == 10
 
     # A valid value is still accepted.
-    assert await client.request("settings.set", {"key": "maximum_reply_length", "value": "150"}) == {}
-    assert harness.database.get_settings().maximum_reply_length == 150
+    assert await client.request("settings.set", {"key": "context_message_limit", "value": "25"}) == {}
+    assert harness.database.get_settings().context_message_limit == 25
 
     # And the pipeline still runs end-to-end after the rejected writes.
     await harness.imsg.push(make_message(rowid=1, guid="g1", chat_id=1, text="still works?"))

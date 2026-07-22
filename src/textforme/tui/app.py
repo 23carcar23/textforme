@@ -35,7 +35,7 @@ from .settings import ModelPickerModal, SettingsPanel
 _CONNECTION_ERRORS = {"NOT_CONNECTED", "CONNECTION_ERROR", "CONNECTION_CLOSED"}
 
 _FOOTER_TEXT = (
-    "↑/↓ Move    Space Toggle    Tab Settings    S Save    Shift+L Logs    Q Quit"
+    "↑/↓ Move    Space AI    T Timer    Tab Settings    S Save    Shift+L Logs    Q Quit"
 )
 
 
@@ -401,6 +401,23 @@ class TextForMeApp(App[None]):
                 self.notify("Group chats cannot have AI enabled.", severity="warning")
             else:
                 self.notify(f"Could not update contact: {code}", severity="error")
+            if code in _CONNECTION_ERRORS:
+                self._set_connected(False)
+
+    async def on_contacts_table_timer_toggled(self, message: ContactsTable.TimerToggled) -> None:
+        message.stop()
+        try:
+            await self.client.request(
+                "contacts.set_reply_timer",
+                {"chat_guid": message.chat_guid, "enabled": message.enabled},
+            )
+        except RuntimeError as exc:
+            code = str(exc)
+            self.query_one(ContactsTable).mark_timer(message.chat_guid, not message.enabled)
+            if code == "GROUP_FORBIDDEN":
+                self.notify("Group chats cannot use a reply timer.", severity="warning")
+            else:
+                self.notify(f"Could not update reply timer: {code}", severity="error")
             if code in _CONNECTION_ERRORS:
                 self._set_connected(False)
 

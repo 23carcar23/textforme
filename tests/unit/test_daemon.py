@@ -85,6 +85,14 @@ class FakeDatabase:
             raise ValueError("GROUP_FORBIDDEN")
         self._contacts[chat_guid] = replace(contact, ai_enabled=enabled)
 
+    def set_contact_reply_timer(self, chat_guid: str, enabled: bool) -> None:
+        contact = self._contacts.get(chat_guid)
+        if contact is None:
+            raise KeyError(f"Unknown contact: {chat_guid}")
+        if contact.is_group:
+            raise ValueError("GROUP_FORBIDDEN")
+        self._contacts[chat_guid] = replace(contact, reply_timer_enabled=enabled)
+
     def set_contact_last_seen(self, chat_guid: str, message_guid: str) -> None:
         contact = self._contacts.get(chat_guid)
         if contact is not None:
@@ -253,7 +261,6 @@ async def test_empty_text_ignored_no_record():
 async def test_duplicate_guid_second_event_ignored_no_second_send():
     db = FakeDatabase()
     db.set_setting("selected_model_id", "claude-test")
-    db.set_setting("response_delay_seconds", "0")
     db.upsert_contact(make_contact(chat_guid="c1", chat_id=1, ai_enabled=True))
     imsg = FakeImsgClient()
     daemon = make_daemon(database=db, imsg_client=imsg, responder=FakeResponder())
@@ -332,44 +339,88 @@ async def test_auto_pause_triggers_and_sets_paused():
     assert db._processed["g3"]["status"] == "skipped:auto_paused"
 
 
-# -- pipeline: step 13 delay re-check --------------------------------------------
+# -- pipeline: realistic-texting reply timer -------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_toggle_flip_during_delay_aborts_as_skipped(monkeypatch):
+async def test_reply_timer_batches_burst_into_single_reply(monkeypatch):
+    # Make the random countdown effectively instant so the batch fires promptly.
+    monkeypatch.setattr(daemon_module.random, "uniform", lambda a, b: 0.0)
     db = FakeDatabase()
     db.set_setting("selected_model_id", "claude-test")
-    db.upsert_contact(make_contact(chat_guid="c1", chat_id=1, ai_enabled=True))
+    db.upsert_contact(
+        make_contact(chat_guid="c1", chat_id=1, ai_enabled=True, reply_timer_enabled=True)
+    )
+    imsg = FakeImsgClient()
+    responder = FakeResponder(reply_text="one reply for all")
+    daemon = make_daemon(database=db, imsg_client=imsg, responder=responder)
+
+    # A burst of three messages arrives during the (zero-length) window.
+    for i in range(3):
+        await daemon.process_message(
+            make_message(rowid=i + 1, guid=f"g{i}", chat_id=1, text=f"msg {i}")
+        )
+
+    # Let the timer task fire.
+    for _ in range(100):
+        if imsg.sent_messages:
+            break
+        await asyncio.sleep(0.01)
+
+    # Exactly one reply covers the whole burst.
+    assert len(imsg.sent_messages) == 1
+    assert imsg.sent_messages[0] == (1, "one reply for all")
+    # The earlier messages are recorded as batched; one is marked replied.
+    statuses = sorted(db._processed[g]["status"] for g in ("g0", "g1", "g2"))
+    assert statuses.count("replied") == 1
+    assert statuses.count("batched") == 2
+
+
+@pytest.mark.asyncio
+async def test_reply_timer_off_replies_to_each_message():
+    db = FakeDatabase()
+    db.set_setting("selected_model_id", "claude-test")
+    db.upsert_contact(
+        make_contact(chat_guid="c1", chat_id=1, ai_enabled=True, reply_timer_enabled=False)
+    )
     imsg = FakeImsgClient()
     daemon = make_daemon(database=db, imsg_client=imsg)
 
-    async def flipping_delay(seconds: float) -> None:
-        # Simulate the toggle being flipped off by the TUI while we wait.
-        db.set_setting("global_ai_enabled", "false")
+    for i in range(3):
+        await daemon.process_message(
+            make_message(rowid=i + 1, guid=f"g{i}", chat_id=1, text=f"msg {i}")
+        )
 
-    monkeypatch.setattr(daemon_module, "apply_response_delay", flipping_delay)
-
-    msg = make_message(rowid=1, guid="g1", chat_id=1, text="hi")
-    await daemon.process_message(msg)
-
-    assert db._processed["g1"]["status"] == "skipped:global_off"
-    assert imsg.sent_messages == []
+    # No batching: every message got its own immediate reply.
+    assert len(imsg.sent_messages) == 3
+    assert all(db._processed[f"g{i}"]["status"] == "replied" for i in range(3))
 
 
 @pytest.mark.asyncio
-async def test_busy_chat_skips_silently_no_record():
+async def test_reply_timer_second_message_does_not_start_new_timer(monkeypatch):
+    starts: list[float] = []
+
+    def counting_uniform(a, b):
+        starts.append(1.0)
+        return 5.0  # long enough that the timer stays running through the burst
+
+    monkeypatch.setattr(daemon_module.random, "uniform", counting_uniform)
     db = FakeDatabase()
     db.set_setting("selected_model_id", "claude-test")
-    db.set_setting("response_delay_seconds", "0")
-    db.upsert_contact(make_contact(chat_guid="c1", chat_id=1, ai_enabled=True))
+    db.upsert_contact(
+        make_contact(chat_guid="c1", chat_id=1, ai_enabled=True, reply_timer_enabled=True)
+    )
     daemon = make_daemon(database=db)
-    assert daemon.scheduler.try_acquire("c1") is True  # simulate an in-flight reply
 
-    msg = make_message(rowid=1, guid="g1", chat_id=1, text="hi")
-    await daemon.process_message(msg)
+    for i in range(4):
+        await daemon.process_message(
+            make_message(rowid=i + 1, guid=f"g{i}", chat_id=1, text=f"msg {i}")
+        )
 
-    assert "g1" not in db._processed
-    assert db.get_settings().last_seen_rowid == 1
+    # Only the first message of the burst started a countdown.
+    assert len(starts) == 1
+    assert daemon._timers.is_running("c1") is True
+    daemon._timers.cancel_all()
 
 
 # -- pipeline: steps 14-17 failure/success paths ---------------------------------
@@ -379,7 +430,6 @@ async def test_busy_chat_skips_silently_no_record():
 async def test_successful_reply_recorded_and_sent():
     db = FakeDatabase()
     db.set_setting("selected_model_id", "claude-test")
-    db.set_setting("response_delay_seconds", "0")
     db.upsert_contact(make_contact(chat_guid="c1", chat_id=1, ai_enabled=True))
     imsg = FakeImsgClient()
     responder = FakeResponder(reply_text="hey there!")
@@ -400,7 +450,6 @@ async def test_successful_reply_recorded_and_sent():
 async def test_get_history_failure_records_imsg_unavailable():
     db = FakeDatabase()
     db.set_setting("selected_model_id", "claude-test")
-    db.set_setting("response_delay_seconds", "0")
     db.upsert_contact(make_contact(chat_guid="c1", chat_id=1, ai_enabled=True))
     imsg = FakeImsgClient()
     imsg.get_history_should_fail = True
@@ -418,7 +467,6 @@ async def test_get_history_failure_records_imsg_unavailable():
 async def test_missing_api_key_records_no_api_key():
     db = FakeDatabase()
     db.set_setting("selected_model_id", "claude-test")
-    db.set_setting("response_delay_seconds", "0")
     db.upsert_contact(make_contact(chat_guid="c1", chat_id=1, ai_enabled=True))
     daemon = Daemon(
         imsg_client=FakeImsgClient(),
@@ -438,7 +486,6 @@ async def test_missing_api_key_records_no_api_key():
 @pytest.mark.asyncio
 async def test_no_model_selected_records_no_model():
     db = FakeDatabase()  # selected_model_id defaults to ""
-    db.set_setting("response_delay_seconds", "0")
     db.upsert_contact(make_contact(chat_guid="c1", chat_id=1, ai_enabled=True))
     daemon = make_daemon(database=db)
 
@@ -453,7 +500,6 @@ async def test_no_model_selected_records_no_model():
 async def test_anthropic_timeout_records_anthropic_timeout():
     db = FakeDatabase()
     db.set_setting("selected_model_id", "claude-test")
-    db.set_setting("response_delay_seconds", "0")
     db.upsert_contact(make_contact(chat_guid="c1", chat_id=1, ai_enabled=True))
     responder = FakeResponder(should_raise=AnthropicUnavailableError("timeout: took too long"))
     daemon = make_daemon(database=db, responder=responder)
@@ -468,7 +514,6 @@ async def test_anthropic_timeout_records_anthropic_timeout():
 async def test_anthropic_generic_error_records_anthropic_error():
     db = FakeDatabase()
     db.set_setting("selected_model_id", "claude-test")
-    db.set_setting("response_delay_seconds", "0")
     db.upsert_contact(make_contact(chat_guid="c1", chat_id=1, ai_enabled=True))
     responder = FakeResponder(should_raise=AnthropicUnavailableError("connection refused"))
     daemon = make_daemon(database=db, responder=responder)
@@ -483,7 +528,6 @@ async def test_anthropic_generic_error_records_anthropic_error():
 async def test_validation_error_records_validation_failed():
     db = FakeDatabase()
     db.set_setting("selected_model_id", "claude-test")
-    db.set_setting("response_delay_seconds", "0")
     db.upsert_contact(make_contact(chat_guid="c1", chat_id=1, ai_enabled=True))
     responder = FakeResponder(should_raise=ReplyValidationError("empty after validation"))
     daemon = make_daemon(database=db, responder=responder)
@@ -498,7 +542,6 @@ async def test_validation_error_records_validation_failed():
 async def test_send_failure_records_send_failed():
     db = FakeDatabase()
     db.set_setting("selected_model_id", "claude-test")
-    db.set_setting("response_delay_seconds", "0")
     db.upsert_contact(make_contact(chat_guid="c1", chat_id=1, ai_enabled=True))
     imsg = FakeImsgClient()
     imsg.send_should_fail = True
@@ -520,7 +563,6 @@ async def test_send_failure_records_send_failed():
 async def test_watch_loop_processes_pushed_messages_and_advances_watermark():
     db = FakeDatabase()
     db.set_setting("selected_model_id", "claude-test")
-    db.set_setting("response_delay_seconds", "0")
     db.upsert_contact(make_contact(chat_guid="c1", chat_id=1, ai_enabled=True))
     imsg = FakeImsgClient()
     daemon = make_daemon(database=db, imsg_client=imsg)
@@ -667,13 +709,13 @@ async def test_socket_settings_get_and_set():
 
     resp = await daemon._handle_request_line(json.dumps({"id": 8, "method": "settings.get", "params": {}}).encode())
     assert resp["ok"] is True
-    assert "maximum_reply_length" in resp["result"]["settings"]
+    assert "context_message_limit" in resp["result"]["settings"]
 
     resp = await daemon._handle_request_line(
-        json.dumps({"id": 9, "method": "settings.set", "params": {"key": "maximum_reply_length", "value": "150"}}).encode()
+        json.dumps({"id": 9, "method": "settings.set", "params": {"key": "context_message_limit", "value": "25"}}).encode()
     )
     assert resp["ok"] is True
-    assert db.get_settings().maximum_reply_length == 150
+    assert db.get_settings().context_message_limit == 25
 
 
 @pytest.mark.asyncio
@@ -822,7 +864,6 @@ async def test_models_list_api_failure_returns_anthropic_unavailable():
 async def test_style_profile_from_settings_reaches_responder():
     db = FakeDatabase()
     db.set_setting("selected_model_id", "claude-test")
-    db.set_setting("response_delay_seconds", "0")
     db.set_setting("style_profile", "short, lowercase, friendly")
     imsg = FakeImsgClient(chats=[])
     responder = FakeResponder()
