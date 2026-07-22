@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import itertools
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -23,6 +24,14 @@ from .models import Chat, Message
 # subprocess died or its stdout hit EOF). Wakes up any watch_messages()
 # consumer that's blocked waiting on the queue so it can trigger a restart.
 _DEAD = object()
+
+logger = logging.getLogger("textformed")
+
+# asyncio streams default to a 64 KiB line limit; a single messages.history
+# response for a long conversation is one JSON line far bigger than that, and
+# readline() raises instead of returning it. Size the limit for whole-thread
+# history payloads.
+_STREAM_LIMIT = 32 * 1024 * 1024
 
 _DEFAULT_TIMEOUT = 15.0
 _HEALTH_TIMEOUT = 5.0
@@ -55,6 +64,7 @@ class ImsgClient:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
+                limit=_STREAM_LIMIT,
             )
         except FileNotFoundError as exc:
             raise ImsgUnavailableError(f"imsg binary not found: {self._binary}") from exc
@@ -91,6 +101,40 @@ class ImsgClient:
 
         self._fail_all_pending(ImsgUnavailableError("imsg client stopped"))
 
+    def _healthy(self) -> bool:
+        """True while both the subprocess and its reader task are alive."""
+        return (
+            self._process is not None
+            and self._process.returncode is None
+            and self._reader_task is not None
+            and not self._reader_task.done()
+        )
+
+    async def _reap(self) -> None:
+        """Tear down a half-dead session (reader died but the subprocess
+        lives on, or vice versa) so _spawn can start fresh."""
+        reader_task = self._reader_task
+        self._reader_task = None
+        if reader_task is not None:
+            reader_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reader_task
+
+        process = self._process
+        self._process = None
+        if process is not None and process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            with contextlib.suppress(Exception):
+                await process.wait()
+
+        # Drop anything queued by the dead session, including its _DEAD
+        # sentinel; watch_messages resubscribes from the highest rowid seen,
+        # so discarded notifications are re-delivered by the new session.
+        while not self._notif_queue.empty():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                self._notif_queue.get_nowait()
+
     def _fail_all_pending(self, exc: Exception) -> None:
         pending = self._pending
         self._pending = {}
@@ -124,7 +168,7 @@ class ImsgClient:
         except asyncio.CancelledError:
             raise
         except Exception:
-            pass
+            logger.exception("imsg reader loop died (process may still be alive)")
         finally:
             self._fail_all_pending(ImsgUnavailableError("imsg process ended"))
             with contextlib.suppress(Exception):
@@ -149,7 +193,7 @@ class ImsgClient:
         self, method: str, params: dict[str, Any] | None = None, timeout: float = _DEFAULT_TIMEOUT
     ) -> Any:
         process = self._process
-        if process is None or process.returncode is not None or process.stdin is None:
+        if not self._healthy() or process is None or process.stdin is None:
             raise ImsgUnavailableError("imsg process not running")
 
         req_id = next(self._id_counter)
@@ -209,7 +253,8 @@ class ImsgClient:
         backoff = _INITIAL_BACKOFF
 
         while True:
-            if self._process is None or self._process.returncode is not None:
+            if not self._healthy():
+                await self._reap()
                 try:
                     await self._spawn()
                 except ImsgUnavailableError:
