@@ -30,6 +30,22 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+Building the desktop UI requires Node (only when developing — end users never
+need it, since the built assets ship inside the package):
+
+```bash
+cd frontend
+npm install
+npm run build   # writes src/textforme/webui/dist/, which the app serves
+```
+
+While iterating on the React UI, run Vite with hot reload and point the app at it:
+
+```bash
+npm run dev            # in frontend/, serves http://localhost:5173
+textforme --dev        # opens the native window against the dev server
+```
+
 ### Via pip/uv (once published)
 
 ```bash
@@ -40,7 +56,8 @@ uv tool install textforme
 
 ## First Run and Setup
 
-1. **Start the TUI**:
+1. **Start the app** (opens the native desktop window; use `textforme tui` for
+   the terminal interface instead):
    ```bash
    textforme
    ```

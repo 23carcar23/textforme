@@ -1,7 +1,9 @@
 """`textforme` entry point. Owner: Agent 3.
 
 Usage:
-  textforme            # onboarding on first run, else the TUI
+  textforme            # onboarding on first run, else the desktop UI
+  textforme tui        # the terminal UI
+  textforme --dev      # desktop UI pointed at the Vite dev server
   textforme install    # (re)install + start the LaunchAgent
   textforme uninstall  # stop + remove LaunchAgent, keep data
   textforme start      # start the daemon (installs first if needed)
@@ -20,7 +22,9 @@ from .onboarding import needs_onboarding, run_onboarding
 from .tui.app import DaemonClient, run_app
 
 _USAGE = """Usage:
-  textforme            # onboarding on first run, else the TUI
+  textforme            # onboarding on first run, else the desktop UI
+  textforme tui        # the terminal UI
+  textforme --dev      # desktop UI pointed at the Vite dev server
   textforme install    # (re)install + start the LaunchAgent
   textforme uninstall  # stop + remove LaunchAgent, keep data
   textforme start      # start the daemon (installs first if needed)
@@ -93,7 +97,16 @@ def _cmd_status() -> int:
     return 0
 
 
-def _cmd_default() -> int:
+def _cmd_default(dev: bool = False) -> int:
+    if needs_onboarding():
+        if not run_onboarding():
+            return 1
+    from .webui.window import run_webui  # deferred: imports pywebview/Cocoa
+
+    return run_webui(dev=dev)
+
+
+def _cmd_tui() -> int:
     if needs_onboarding():
         if not run_onboarding():
             return 1
@@ -105,8 +118,10 @@ def main() -> None:
     args = sys.argv[1:]
     command = args[0] if args else ""
 
-    if command in ("", "run"):
-        code = _cmd_default()
+    if command in ("", "run", "--dev"):
+        code = _cmd_default(dev=command == "--dev")
+    elif command == "tui":
+        code = _cmd_tui()
     elif command == "install":
         code = _cmd_install()
     elif command == "uninstall":

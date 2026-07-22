@@ -42,25 +42,41 @@ class ConnectedFakeDaemonClient(FakeDaemonClient):
         }
 
 
-# -- default command (onboarding + TUI) ----------------------------------
+# -- default command (onboarding + desktop UI) ---------------------------
 
 
-def test_default_runs_onboarding_when_needed_then_launches_app(monkeypatch):
+def _patch_webui(monkeypatch, sink):
+    """Stub the deferred `from .webui.window import run_webui` import so the
+    default command can be tested without pywebview/Cocoa."""
+    import sys as _sys
+    import types
+
+    module = types.ModuleType("textforme.webui.window")
+
+    def _run_webui(dev: bool = False) -> int:
+        sink.append("dev" if dev else "ran")
+        return 0
+
+    module.run_webui = _run_webui
+    monkeypatch.setitem(_sys.modules, "textforme.webui.window", module)
+
+
+def test_default_runs_onboarding_when_needed_then_launches_ui(monkeypatch):
     monkeypatch.setattr(cli.sys, "argv", ["textforme"])
     monkeypatch.setattr(cli, "needs_onboarding", lambda: True)
 
     onboarding_calls = []
     monkeypatch.setattr(cli, "run_onboarding", lambda: (onboarding_calls.append("ran"), True)[1])
 
-    app_calls = []
-    monkeypatch.setattr(cli, "run_app", lambda: app_calls.append("ran"))
+    ui_calls = []
+    _patch_webui(monkeypatch, ui_calls)
 
     with pytest.raises(SystemExit) as excinfo:
         cli.main()
 
     assert excinfo.value.code == 0
     assert onboarding_calls == ["ran"]
-    assert app_calls == ["ran"]
+    assert ui_calls == ["ran"]
 
 
 def test_default_skips_onboarding_when_not_needed(monkeypatch):
@@ -70,6 +86,50 @@ def test_default_skips_onboarding_when_not_needed(monkeypatch):
     onboarding_calls = []
     monkeypatch.setattr(cli, "run_onboarding", lambda: onboarding_calls.append("ran"))
 
+    ui_calls = []
+    _patch_webui(monkeypatch, ui_calls)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code == 0
+    assert onboarding_calls == []
+    assert ui_calls == ["ran"]
+
+
+def test_dev_flag_launches_ui_in_dev_mode(monkeypatch):
+    monkeypatch.setattr(cli.sys, "argv", ["textforme", "--dev"])
+    monkeypatch.setattr(cli, "needs_onboarding", lambda: False)
+
+    ui_calls = []
+    _patch_webui(monkeypatch, ui_calls)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code == 0
+    assert ui_calls == ["dev"]
+
+
+def test_default_exits_nonzero_and_skips_ui_when_onboarding_fails(monkeypatch):
+    monkeypatch.setattr(cli.sys, "argv", ["textforme"])
+    monkeypatch.setattr(cli, "needs_onboarding", lambda: True)
+    monkeypatch.setattr(cli, "run_onboarding", lambda: False)
+
+    ui_calls = []
+    _patch_webui(monkeypatch, ui_calls)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code != 0
+    assert ui_calls == []
+
+
+def test_tui_subcommand_launches_terminal_app(monkeypatch):
+    monkeypatch.setattr(cli.sys, "argv", ["textforme", "tui"])
+    monkeypatch.setattr(cli, "needs_onboarding", lambda: False)
+
     app_calls = []
     monkeypatch.setattr(cli, "run_app", lambda: app_calls.append("ran"))
 
@@ -77,23 +137,7 @@ def test_default_skips_onboarding_when_not_needed(monkeypatch):
         cli.main()
 
     assert excinfo.value.code == 0
-    assert onboarding_calls == []
     assert app_calls == ["ran"]
-
-
-def test_default_exits_nonzero_and_skips_app_when_onboarding_fails(monkeypatch):
-    monkeypatch.setattr(cli.sys, "argv", ["textforme"])
-    monkeypatch.setattr(cli, "needs_onboarding", lambda: True)
-    monkeypatch.setattr(cli, "run_onboarding", lambda: False)
-
-    app_calls = []
-    monkeypatch.setattr(cli, "run_app", lambda: app_calls.append("ran"))
-
-    with pytest.raises(SystemExit) as excinfo:
-        cli.main()
-
-    assert excinfo.value.code != 0
-    assert app_calls == []
 
 
 # -- install / uninstall ---------------------------------------------------

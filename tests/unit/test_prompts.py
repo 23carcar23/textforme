@@ -249,3 +249,58 @@ def test_empty_style_profile_leaves_prompt_unchanged():
     without, _ = build_request("Alex", [], incoming, 300)
     assert with_style == without
     assert "personal style" not in without
+
+
+def test_build_request_omits_description_section_when_empty():
+    incoming = make_message("g1", "hello", is_from_me=False)
+    system_default, _ = build_request("Bob", [], incoming, max_reply_chars=200)
+    system_empty, _ = build_request(
+        "Bob", [], incoming, max_reply_chars=200, contact_description=""
+    )
+    assert system_default == system_empty
+    assert "owner has left this note" not in system_default
+
+
+# -- build_request: owner-authored custom prompts ------------------------------
+
+
+def test_build_request_uses_custom_system_prompt_over_default():
+    incoming = make_message("g1", "hello", is_from_me=False)
+    system, _ = build_request(
+        "Bob", [], incoming, max_reply_chars=200,
+        system_prompt="Reply to {contact_name} in at most {max_chars} chars. Be terse.",
+    )
+    # Placeholders are filled; the default prompt text is gone.
+    assert "Reply to Bob in at most 200 chars." in system
+    assert "automated texting assistant" not in system
+
+
+def test_build_request_custom_system_prompt_with_stray_braces_is_safe():
+    incoming = make_message("g1", "hello", is_from_me=False)
+    # A user might paste braces; this must not raise a format/KeyError.
+    system, _ = build_request(
+        "Bob", [], incoming, max_reply_chars=200,
+        system_prompt="Use JSON like {\"tone\": \"warm\"} and greet {contact_name}.",
+    )
+    assert "greet Bob" in system
+    assert '{"tone": "warm"}' in system
+
+
+def test_build_request_appends_persona_and_style():
+    incoming = make_message("g1", "hello", is_from_me=False)
+    system, _ = build_request(
+        "Bob", [], incoming, max_reply_chars=200,
+        persona="I'm a 30yo climber from Denver.",
+        style_profile="lowercase, no periods, lots of 'lol'",
+    )
+    assert "I'm a 30yo climber from Denver." in system
+    assert "lowercase, no periods" in system
+
+
+def test_build_request_omits_persona_and_style_when_empty():
+    incoming = make_message("g1", "hello", is_from_me=False)
+    default, _ = build_request("Bob", [], incoming, max_reply_chars=200)
+    same, _ = build_request(
+        "Bob", [], incoming, max_reply_chars=200, persona="", style_profile=""
+    )
+    assert default == same

@@ -217,7 +217,7 @@ async def test_set_description_validation_errors(daemon_harness_factory):
     with pytest.raises(RuntimeError, match="BAD_PARAMS"):
         await client.request("contacts.set_description", {"chat_guid": "missing", "description": "x"})
     with pytest.raises(RuntimeError, match="BAD_PARAMS"):
-        await client.request("contacts.set_description", {"chat_guid": "c1", "description": "x" * 501})
+        await client.request("contacts.set_description", {"chat_guid": "c1", "description": "x" * 2001})
     with pytest.raises(RuntimeError, match="BAD_PARAMS"):
         await client.request("contacts.set_description", {"chat_guid": "c1"})
 

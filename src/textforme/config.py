@@ -19,6 +19,12 @@ LAUNCH_AGENT_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCH_AGENT_L
 KEYCHAIN_SERVICE = "TextForMe"
 KEYCHAIN_ACCOUNT = "anthropic-api-key"
 
+# Upper bound for the owner-written per-contact note and the custom prompt
+# fields. Large enough for full paragraphs, small enough to stay well under
+# the daemon socket's line-read limit.
+MAX_CONTACT_NOTE_CHARS = 2000
+MAX_PROMPT_CHARS = 6000
+
 # All settings are stored as strings in SQLite; Settings handles typing.
 DEFAULT_SETTINGS: dict[str, str] = {
     "selected_model_id": "",
@@ -34,7 +40,13 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "failure_pause_threshold": "5",
     "last_seen_rowid": "0",
     "onboarding_complete": "false",
-    "style_profile": "",  # description of the owner's texting style, added to the system prompt
+    # Owner-authored prompt customization (empty = use built-in defaults).
+    # system_prompt overrides the base texting-assistant instructions;
+    # persona_prompt describes the owner; style_profile describes how the
+    # owner texts. See anthropic/prompts.py for how they are assembled.
+    "system_prompt": "",
+    "persona_prompt": "",
+    "style_profile": "",
 }
 
 
@@ -59,6 +71,8 @@ class Settings:
     failure_pause_threshold: int = 5
     last_seen_rowid: int = 0
     onboarding_complete: bool = False
+    system_prompt: str = ""
+    persona_prompt: str = ""
     style_profile: str = ""
 
     @classmethod
@@ -78,6 +92,8 @@ class Settings:
             failure_pause_threshold=int(merged["failure_pause_threshold"] or 5),
             last_seen_rowid=int(merged["last_seen_rowid"] or 0),
             onboarding_complete=_to_bool(merged["onboarding_complete"]),
+            system_prompt=merged["system_prompt"],
+            persona_prompt=merged["persona_prompt"],
             style_profile=merged["style_profile"],
         )
 
@@ -96,6 +112,8 @@ class Settings:
             "failure_pause_threshold": str(self.failure_pause_threshold),
             "last_seen_rowid": str(self.last_seen_rowid),
             "onboarding_complete": str(self.onboarding_complete).lower(),
+            "system_prompt": self.system_prompt,
+            "persona_prompt": self.persona_prompt,
             "style_profile": self.style_profile,
         }
 

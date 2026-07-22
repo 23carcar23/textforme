@@ -150,7 +150,7 @@ class ContactNotePanel(Vertical):
         yield Static("Select a contact to add a note.", id="note-target")
         yield Input(
             placeholder='e.g. "my very strict mom so be nice to her"',
-            max_length=500,
+            max_length=config.MAX_CONTACT_NOTE_CHARS,
             id="note-input",
             disabled=True,
         )
@@ -336,6 +336,38 @@ class TextForMeApp(App[None]):
             has_api_key(),
             model_names=self._model_names if models else None,
         )
+        self._refresh_note_panel()
+
+    def _refresh_note_panel(self) -> None:
+        contact = self.query_one(ContactsTable).cursor_contact()
+        self.query_one(ContactNotePanel).show_contact(contact)
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if isinstance(event.data_table, ContactsTable):
+            self._refresh_note_panel()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "note-input":
+            return
+        event.stop()
+        note_panel = self.query_one(ContactNotePanel)
+        chat_guid = note_panel.current_guid
+        if chat_guid is None:
+            return
+        description = event.value.strip()
+        try:
+            await self.client.request(
+                "contacts.set_description",
+                {"chat_guid": chat_guid, "description": description},
+            )
+        except RuntimeError as exc:
+            code = str(exc)
+            self.notify(f"Could not save note: {code}", severity="error")
+            if code in _CONNECTION_ERRORS:
+                self._set_connected(False)
+            return
+        self.query_one(ContactsTable).set_description(chat_guid, description)
+        self.notify("Contact note saved.", severity="information")
 
     async def _fetch_models(self, notify_errors: bool) -> list[dict[str, str]]:
         """models.list via the daemon; updates the id->display_name cache."""
@@ -416,6 +448,9 @@ class TextForMeApp(App[None]):
         except ValueError:
             new_id = ids[0]
         self.post_message(SettingsPanel.Changed("selected_model_id", new_id))
+
+    def action_show_logs(self) -> None:
+        self.push_screen(LogModal())
 
     def action_save(self) -> None:
         # Edits already apply immediately via settings.set / contacts.set_ai;

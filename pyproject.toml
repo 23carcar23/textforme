@@ -12,6 +12,7 @@ license = { text = "MIT" }
 dependencies = [
     "textual>=0.80",
     "anthropic>=0.40",
+    "pywebview>=5.0",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +27,8 @@ textformed = "textforme.daemon:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/textforme"]
+# The built React app is gitignored (dist/) but must ship in the wheel.
+artifacts = ["src/textforme/webui/dist"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

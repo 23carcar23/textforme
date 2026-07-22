@@ -348,6 +348,8 @@ class Daemon:
                     msg,
                     settings.selected_model_id,
                     settings.maximum_reply_length,
+                    system_prompt=settings.system_prompt,
+                    persona_prompt=settings.persona_prompt,
                     style_profile=settings.style_profile,
                 )
             except AnthropicUnavailableError as exc:
@@ -515,8 +517,11 @@ class Daemon:
             description = params.get("description")
             if not isinstance(chat_guid, str) or not isinstance(description, str):
                 raise _SocketError("BAD_PARAMS", "chat_guid (str) and description (str) are required")
-            if len(description) > 500:
-                raise _SocketError("BAD_PARAMS", "description must be 500 characters or fewer")
+            if len(description) > config.MAX_CONTACT_NOTE_CHARS:
+                raise _SocketError(
+                    "BAD_PARAMS",
+                    f"description must be {config.MAX_CONTACT_NOTE_CHARS} characters or fewer",
+                )
             try:
                 database.set_contact_description(chat_guid, description)
             except KeyError as exc:

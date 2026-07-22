@@ -37,6 +37,20 @@ def collect_log_lines(log_dir: Path | None = None, max_lines: int = MAX_LINES) -
     return tail_lines(directory / "daemon.log", max_lines)
 
 
+def clear_log_file(log_dir: Path | None = None) -> bool:
+    """Truncate the daemon's main log file. Safe to call while the daemon is
+    running: its RotatingFileHandler holds the file open in append mode, which
+    on POSIX always writes at the current end-of-file regardless of external
+    truncation, so no writes are lost or misplaced."""
+    directory = log_dir if log_dir is not None else config.LOG_DIR
+    try:
+        with (directory / "daemon.log").open("w", encoding="utf-8"):
+            pass
+    except OSError:
+        return False
+    return True
+
+
 class LogPanel(Log):
     """Read-only, auto-refreshing tail of the daemon log."""
 
