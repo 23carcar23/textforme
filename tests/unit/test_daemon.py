@@ -199,7 +199,7 @@ class FakeResponder:
 
     async def generate_reply(
         self, contact, recent_messages, incoming_message, model_id, max_reply_chars,
-        style_profile: str = "",
+        style_profile: str = "", **kwargs
     ) -> str:
         self.calls.append((contact.chat_guid, model_id))
         self.style_profiles = getattr(self, "style_profiles", [])
