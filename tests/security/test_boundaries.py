@@ -90,7 +90,6 @@ async def test_sentinel_api_key_never_persisted_or_logged(
     db_path = tmp_path / "key_hygiene.db"
     database = Database(db_path)
     database.set_setting("selected_model_id", "claude-test")
-    database.set_setting("response_delay_seconds", "0")
     database.upsert_contact(make_contact(chat_guid="c1", chat_id=1, ai_enabled=True))
 
     imsg = FakeImsgClient()
@@ -126,7 +125,7 @@ async def test_sentinel_api_key_never_persisted_or_logged(
 async def test_oversized_reply_is_truncated_to_max_length(daemon_harness_factory):
     harness = await daemon_harness_factory(
         contacts=[make_contact(chat_guid="c1", chat_id=1, ai_enabled=True)],
-        settings={"selected_model_id": "claude-test", "maximum_reply_length": "300"},
+        settings={"selected_model_id": "claude-test"},
     )
     harness.anthropic.default_reply = "word " * 2000  # ~10000 chars
 

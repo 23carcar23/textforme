@@ -26,6 +26,9 @@ class ContactRecord:
     ai_enabled: bool
     last_seen_message_guid: str | None = None
     description: str = ""
+    # "Realistic texting" per-contact toggle: when on, incoming bursts are
+    # batched behind a random 0–3 minute timer instead of replied to one by one.
+    reply_timer_enabled: bool = False
 
 
 class Database:
@@ -98,6 +101,12 @@ class Database:
                     2,
                     """
                     ALTER TABLE contacts ADD COLUMN description TEXT NOT NULL DEFAULT ''
+                    """,
+                ),
+                (
+                    3,
+                    """
+                    ALTER TABLE contacts ADD COLUMN reply_timer_enabled INTEGER NOT NULL DEFAULT 0
                     """,
                 ),
             ]
@@ -188,7 +197,8 @@ class Database:
             cursor = self._conn.cursor()
             cursor.execute(
                 """SELECT chat_guid, chat_id, display_name, address, service,
-                is_group, ai_enabled, last_seen_message_guid, description
+                is_group, ai_enabled, last_seen_message_guid, description,
+                reply_timer_enabled
                 FROM contacts
                 ORDER BY is_group ASC, display_name COLLATE NOCASE ASC"""
             )
@@ -208,6 +218,7 @@ class Database:
             ai_enabled=bool(row[6]),
             last_seen_message_guid=row[7],
             description=row[8] or "",
+            reply_timer_enabled=bool(row[9]) if len(row) > 9 else False,
         )
 
     def get_contact_by_chat_id(self, chat_id: int) -> ContactRecord | None:
@@ -215,7 +226,8 @@ class Database:
             cursor = self._conn.cursor()
             cursor.execute(
                 """SELECT chat_guid, chat_id, display_name, address, service,
-                is_group, ai_enabled, last_seen_message_guid, description
+                is_group, ai_enabled, last_seen_message_guid, description,
+                reply_timer_enabled
                 FROM contacts WHERE chat_id = ?""",
                 (chat_id,),
             )
@@ -228,7 +240,8 @@ class Database:
             cursor = self._conn.cursor()
             cursor.execute(
                 """SELECT chat_guid, chat_id, display_name, address, service,
-                is_group, ai_enabled, last_seen_message_guid, description
+                is_group, ai_enabled, last_seen_message_guid, description,
+                reply_timer_enabled
                 FROM contacts WHERE chat_guid = ?""",
                 (chat_guid,),
             )
@@ -251,6 +264,28 @@ class Database:
 
             cursor.execute(
                 "UPDATE contacts SET ai_enabled = ? WHERE chat_guid = ?",
+                (1 if enabled else 0, chat_guid),
+            )
+            self._conn.commit()
+
+    def set_contact_reply_timer(self, chat_guid: str, enabled: bool) -> None:
+        """Toggle the per-contact realistic-texting reply timer.
+
+        Raises ValueError('GROUP_FORBIDDEN') for group chats; KeyError if unknown.
+        """
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("SELECT is_group FROM contacts WHERE chat_guid = ?", (chat_guid,))
+            row = cursor.fetchone()
+
+            if not row:
+                raise KeyError(f"Unknown contact: {chat_guid}")
+
+            if bool(row[0]):
+                raise ValueError("GROUP_FORBIDDEN")
+
+            cursor.execute(
+                "UPDATE contacts SET reply_timer_enabled = ? WHERE chat_guid = ?",
                 (1 if enabled else 0, chat_guid),
             )
             self._conn.commit()
@@ -322,6 +357,33 @@ class Database:
             )
             result = cursor.fetchone()
             return result[0] if result else 0
+
+    def latest_reply_at(self) -> str | None:
+        """Most recent reply_sent_at across all chats, ISO 8601 or None."""
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """SELECT MAX(reply_sent_at) FROM processed_messages
+                WHERE status = 'replied' AND reply_sent_at IS NOT NULL"""
+            )
+            result = cursor.fetchone()
+            return result[0] if result and result[0] else None
+
+    def chats_with_replies_since(self, since_iso: str) -> list[str]:
+        """Distinct chat_guids that received an AI reply after ``since_iso``,
+        most recently active first. Pass '' to get every chat ever replied to."""
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """SELECT chat_guid, MAX(reply_sent_at) AS latest
+                FROM processed_messages
+                WHERE status = 'replied' AND reply_sent_at IS NOT NULL
+                AND reply_sent_at > ?
+                GROUP BY chat_guid
+                ORDER BY latest DESC""",
+                (since_iso,),
+            )
+            return [row[0] for row in cursor.fetchall()]
 
     def last_reply_at(self, chat_guid: str) -> str | None:
         """Most recent reply_sent_at for this chat, ISO 8601 or None."""

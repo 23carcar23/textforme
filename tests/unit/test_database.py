@@ -61,7 +61,7 @@ class TestSchemaAndInit:
         version = cursor.fetchone()
 
         assert version is not None
-        assert version[0] == 2
+        assert version[0] == 3
         db.close()
 
 
@@ -76,7 +76,7 @@ class TestSettings:
         assert settings.selected_model_id == DEFAULT_SETTINGS["selected_model_id"]
         assert settings.global_ai_enabled is True  # 'true' string converts to True
         assert settings.paused is False
-        assert settings.maximum_reply_length == 300
+        assert settings.context_message_limit == 10
         db.close()
 
     def test_set_and_get_setting(self, tmp_path: Path) -> None:
@@ -480,6 +480,58 @@ class TestProcessedMessages:
         last_reply = db.last_reply_at("unknown-chat")
 
         assert last_reply is None
+
+    def test_latest_reply_at_across_chats(self, tmp_path: Path) -> None:
+        """latest_reply_at should return the newest reply_sent_at over all chats."""
+        db = Database(tmp_path / "test.db")
+
+        now = datetime.now(timezone.utc)
+        time1 = (now - timedelta(hours=2)).isoformat()
+        time2 = (now - timedelta(minutes=5)).isoformat()
+
+        db.record_processed("m1", "chatA", "replied", reply_sent=True)
+        cursor = db._conn.cursor()
+        cursor.execute("UPDATE processed_messages SET reply_sent_at = ? WHERE message_guid = 'm1'", (time1,))
+        db._conn.commit()
+        db.record_processed("m2", "chatB", "replied", reply_sent=True)
+        cursor.execute("UPDATE processed_messages SET reply_sent_at = ? WHERE message_guid = 'm2'", (time2,))
+        db._conn.commit()
+        db.record_processed("m3", "chatB", "failed")
+
+        assert db.latest_reply_at() == time2
+        db.close()
+
+    def test_latest_reply_at_none_without_replies(self, tmp_path: Path) -> None:
+        db = Database(tmp_path / "test.db")
+        db.record_processed("m1", "chatA", "failed")
+        assert db.latest_reply_at() is None
+        db.close()
+
+    def test_chats_with_replies_since(self, tmp_path: Path) -> None:
+        """Returns distinct chats replied to after the watermark, newest first;
+        '' returns every chat ever replied to."""
+        db = Database(tmp_path / "test.db")
+
+        now = datetime.now(timezone.utc)
+        old = (now - timedelta(hours=3)).isoformat()
+        mid = (now - timedelta(hours=1)).isoformat()
+        new = (now - timedelta(minutes=2)).isoformat()
+
+        def replied(guid: str, chat: str, when: str) -> None:
+            db.record_processed(guid, chat, "replied", reply_sent=True)
+            cur = db._conn.cursor()
+            cur.execute("UPDATE processed_messages SET reply_sent_at = ? WHERE message_guid = ?", (when, guid))
+            db._conn.commit()
+
+        replied("m1", "chatOld", old)
+        replied("m2", "chatMid", mid)
+        replied("m3", "chatNew", new)
+        db.record_processed("m4", "chatFailed", "failed")
+
+        assert db.chats_with_replies_since("") == ["chatNew", "chatMid", "chatOld"]
+        assert db.chats_with_replies_since(mid) == ["chatNew"]
+        assert db.chats_with_replies_since(new) == []
+        db.close()
         db.close()
 
     def test_recent_consecutive_failures_counts_trailing_failed(self, tmp_path: Path) -> None:

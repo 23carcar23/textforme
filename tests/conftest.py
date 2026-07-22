@@ -202,15 +202,7 @@ class DaemonHarness:
         self.responder = AnthropicResponder(self.anthropic)
         self.socket_path = socket_path or short_socket_path()
 
-        # Default to fast pipeline settings unless overridden; callers can
-        # still override response_delay_seconds / contact_cooldown_seconds
-        # per test.
-        merged_settings: dict[str, str] = {
-            "response_delay_seconds": "0",
-            "contact_cooldown_seconds": "0",
-        }
-        merged_settings.update(settings or {})
-        for key, value in merged_settings.items():
+        for key, value in (settings or {}).items():
             self.database.set_setting(key, value)
 
         for contact in contacts or []:

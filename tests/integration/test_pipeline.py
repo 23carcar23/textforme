@@ -7,15 +7,17 @@ rate-limit race found while writing these (fixed in daemon.py step 13).
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import asyncio
 
 import pytest
 
 from tests.conftest import (
     make_contact,
     make_message,
+    read_processed_row,
     wait_for_processed,
 )
+from textforme import config
 from textforme.messaging.events import AnthropicUnavailableError
 
 
@@ -76,90 +78,82 @@ async def test_group_chat_message_skipped_and_never_sent(daemon_harness_factory)
     assert harness.anthropic.calls == []
 
 
-# -- 6. rate limit + quiet hours -------------------------------------------------
+# -- 6. realistic-texting reply timer + context limit ----------------------------
 
 
-async def test_rate_limit_enforced_sequential_delivery(daemon_harness_factory):
-    """Sequential delivery (each message fully processed before the next is
-    pushed) is the deterministic way to exercise the rate limiter -- the next
-    test covers concurrent delivery of a burst."""
-    harness = await daemon_harness_factory(
-        contacts=[
-            make_contact(chat_guid="c1", chat_id=1, ai_enabled=True),
-            make_contact(chat_guid="c2", chat_id=2, ai_enabled=True),
-            make_contact(chat_guid="c3", chat_id=3, ai_enabled=True),
-        ],
-        settings={
-            "selected_model_id": "claude-test",
-            "global_rate_limit_per_hour": "2",
-        },
-    )
+async def test_reply_timer_batches_burst_into_one_reply(daemon_harness_factory, monkeypatch):
+    """With the per-contact reply timer on, a burst is collapsed into a single
+    batched reply once the (here, instant) countdown expires."""
+    import textforme.daemon as daemon_module
 
-    await harness.imsg.push(make_message(rowid=1, guid="g1", chat_id=1, text="hi1"))
-    row1 = await wait_for_processed(harness.database, "g1")
-    await harness.imsg.push(make_message(rowid=2, guid="g2", chat_id=2, text="hi2"))
-    row2 = await wait_for_processed(harness.database, "g2")
-    await harness.imsg.push(make_message(rowid=3, guid="g3", chat_id=3, text="hi3"))
-    row3 = await wait_for_processed(harness.database, "g3")
-
-    assert row1["status"] == "replied"
-    assert row2["status"] == "replied"
-    assert row3["status"] == "skipped:rate_limit"
-    assert len(harness.imsg.sent_messages) == 2
-
-
-async def test_rate_limit_race_under_truly_concurrent_delivery(daemon_harness_factory):
-    """Regression test: the daemon's post-delay full-policy re-check under the
-    rate lock (with in-flight replies counted as reserved capacity) must keep a
-    concurrent burst from distinct contacts within global_rate_limit_per_hour.
-    Previously all three tasks snapshotted the same stale replies_last_hour and
-    all three sends went out."""
-    harness = await daemon_harness_factory(
-        contacts=[
-            make_contact(chat_guid="c1", chat_id=1, ai_enabled=True),
-            make_contact(chat_guid="c2", chat_id=2, ai_enabled=True),
-            make_contact(chat_guid="c3", chat_id=3, ai_enabled=True),
-        ],
-        settings={
-            "selected_model_id": "claude-test",
-            "global_rate_limit_per_hour": "2",
-        },
-    )
-
-    # Push all three before waiting on any of them, so the watch loop spawns
-    # all three process_message() tasks with none yet completed.
-    await harness.imsg.push(make_message(rowid=1, guid="g1", chat_id=1, text="hi1"))
-    await harness.imsg.push(make_message(rowid=2, guid="g2", chat_id=2, text="hi2"))
-    await harness.imsg.push(make_message(rowid=3, guid="g3", chat_id=3, text="hi3"))
-
-    row1 = await wait_for_processed(harness.database, "g1")
-    row2 = await wait_for_processed(harness.database, "g2")
-    row3 = await wait_for_processed(harness.database, "g3")
-
-    statuses = sorted([row1["status"], row2["status"], row3["status"]])
-    assert statuses == ["replied", "replied", "skipped:rate_limit"]
-    assert len(harness.imsg.sent_messages) == 2
-
-
-async def test_quiet_hours_spanning_now_skips(daemon_harness_factory):
-    now = datetime.now().astimezone()
-    start = (now - timedelta(minutes=2)).strftime("%H:%M")
-    end = (now + timedelta(minutes=2)).strftime("%H:%M")
-
+    # A short-but-nonzero window so the whole burst accumulates before firing.
+    monkeypatch.setattr(daemon_module.random, "uniform", lambda a, b: 0.3)
     harness = await daemon_harness_factory(
         contacts=[make_contact(chat_guid="c1", chat_id=1, ai_enabled=True)],
-        settings={
-            "selected_model_id": "claude-test",
-            "quiet_hours_start": start,
-            "quiet_hours_end": end,
-        },
+        settings={"selected_model_id": "claude-test"},
     )
-    msg = make_message(rowid=1, guid="g1", chat_id=1, text="hi during quiet hours")
-    await harness.imsg.push(msg)
+    # upsert_contact doesn't persist the per-contact timer flag (it defaults off
+    # on a fresh sync); enable it explicitly, as the UI toggle would.
+    harness.database.set_contact_reply_timer("c1", True)
 
+    # A burst of three messages arrives during the window.
+    await harness.imsg.push(make_message(rowid=1, guid="g1", chat_id=1, text="hey"))
+    await harness.imsg.push(make_message(rowid=2, guid="g2", chat_id=1, text="you there"))
+    await harness.imsg.push(make_message(rowid=3, guid="g3", chat_id=1, text="???"))
+
+    for guid in ("g1", "g2", "g3"):
+        await wait_for_processed(harness.database, guid)
+    # Let the countdown expire and the batched reply go out.
+    for _ in range(200):
+        if harness.imsg.sent_messages:
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)  # settle: ensure no second send follows
+
+    # Exactly one reply covers the whole burst.
+    assert len(harness.imsg.sent_messages) == 1
+    statuses = sorted(
+        read_processed_row(harness.database, g)["status"] for g in ("g1", "g2", "g3")
+    )
+    assert statuses.count("replied") == 1
+    assert statuses.count("batched") == 2
+
+
+async def test_reply_timer_off_replies_to_every_message(daemon_harness_factory):
+    """With the reply timer off, each message gets its own immediate reply."""
+    harness = await daemon_harness_factory(
+        contacts=[make_contact(chat_guid="c1", chat_id=1, ai_enabled=True)],
+        settings={"selected_model_id": "claude-test"},
+    )
+
+    for i in range(3):
+        await harness.imsg.push(make_message(rowid=i + 1, guid=f"g{i}", chat_id=1, text=f"m{i}"))
+        await wait_for_processed(harness.database, f"g{i}")
+
+    assert len(harness.imsg.sent_messages) == 3
+
+
+async def test_unlimited_context_limit_pulls_large_history(daemon_harness_factory):
+    """The 'unlimited' context option maps to a large finite limit passed to
+    get_history, not a crash from a non-integer setting."""
+    harness = await daemon_harness_factory(
+        contacts=[make_contact(chat_guid="c1", chat_id=1, ai_enabled=True)],
+        settings={"selected_model_id": "claude-test", "context_message_limit": "unlimited"},
+    )
+    captured: list[int] = []
+    real_get_history = harness.imsg.get_history
+
+    async def spy_get_history(chat_id, limit):
+        captured.append(limit)
+        return await real_get_history(chat_id, limit)
+
+    harness.imsg.get_history = spy_get_history
+
+    await harness.imsg.push(make_message(rowid=1, guid="g1", chat_id=1, text="hi"))
     row = await wait_for_processed(harness.database, "g1")
-    assert row["status"] == "skipped:quiet_hours"
-    assert harness.imsg.sent_messages == []
+
+    assert row["status"] == "replied"
+    assert captured == [config.UNLIMITED_CONTEXT_LIMIT]
 
 
 # -- 7. API failures / auto-pause -------------------------------------------------

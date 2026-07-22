@@ -220,7 +220,52 @@ body {
 
 .bubble-toggle:disabled { opacity: 0.35; cursor: default; }
 
+/* actions cluster on the right of a contact row */
+.contact-actions {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.contact-actions .bubble-toggle { margin-left: 0; }
+
+/* per-contact realistic-texting reply-timer toggle */
+.timer-toggle {
+  flex: none;
+  border: 1.5px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 11px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.timer-toggle.on {
+  background: var(--amber);
+  border-color: var(--amber);
+  color: #2a1a00;
+}
+.timer-toggle:disabled { opacity: 0.35; cursor: default; }
+
+/* live countdown shown beside a contact whose reply timer is running */
+.contact-row .timer-badge {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--amber);
+  border: 1px solid rgba(255, 180, 84, 0.4);
+  border-radius: 5px;
+  padding: 1px 5px;
+  margin-left: 6px;
+  vertical-align: 1px;
+  white-space: nowrap;
+}
+
 .bubble-toggle:focus-visible,
+.timer-toggle:focus-visible,
 .contact-row:focus-visible,
 button:focus-visible,
 input:focus-visible,
@@ -423,6 +468,68 @@ select:focus-visible {
 .empty {
   color: var(--muted);
   padding: 20px;
+}
+
+/* ---------- brief slide-over ---------- */
+
+.brief-sheet {
+  width: min(560px, 90vw);
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  animation: slide-in 0.18s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brief-sheet { animation: none; }
+}
+
+.brief-sheet header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+  font-weight: 600;
+}
+
+.brief-sheet header .stamp {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.brief-sheet header button {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.brief-sheet header button:first-of-type { margin-left: auto; }
+.brief-sheet header button:hover:not(:disabled) { color: var(--text); }
+.brief-sheet header button:disabled { opacity: 0.4; cursor: default; }
+
+.brief-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px;
+}
+
+.brief-status { color: var(--muted); font-size: 13px; }
+.brief-status.error { color: var(--red); }
+
+.brief-text {
+  color: var(--text);
+  font-size: 13.5px;
+  line-height: 1.62;
+  white-space: pre-wrap;
+  user-select: text;
 }
 
 /* ---------- prompts slide-over ---------- */

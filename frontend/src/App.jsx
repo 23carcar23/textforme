@@ -5,6 +5,7 @@ import SettingsPanel from './components/SettingsPanel.jsx'
 import NotePanel from './components/NotePanel.jsx'
 import LogsOverlay from './components/LogsOverlay.jsx'
 import PromptsOverlay from './components/PromptsOverlay.jsx'
+import BriefOverlay from './components/BriefOverlay.jsx'
 
 const POLL_MS = 3000
 
@@ -13,6 +14,7 @@ export default function App() {
   const [selectedGuid, setSelectedGuid] = useState(null)
   const [showLogs, setShowLogs] = useState(false)
   const [showPrompts, setShowPrompts] = useState(false)
+  const [brief, setBrief] = useState(null) // null hidden | 'loading' | 'no_new' | error string | {summary, generated_at}
   const [error, setError] = useState('')
 
   const refresh = useCallback(async () => {
@@ -57,6 +59,26 @@ export default function App() {
     refresh()
   }
 
+  async function toggleTimer(contact) {
+    const enabled = !contact.reply_timer_enabled
+    // optimistic flip; refresh() reconciles
+    setState((prev) => ({
+      ...prev,
+      contacts: prev.contacts.map((c) =>
+        c.chat_guid === contact.chat_guid ? { ...c, reply_timer_enabled: enabled } : c
+      ),
+    }))
+    const res = await call('set_reply_timer', contact.chat_guid, enabled)
+    if (!res.ok) {
+      setError(
+        res.error === 'GROUP_FORBIDDEN'
+          ? 'Group chats cannot use a reply timer.'
+          : `Could not update reply timer (${res.error}).`
+      )
+    }
+    refresh()
+  }
+
   async function saveNote(chatGuid, description) {
     const res = await call('set_note', chatGuid, description)
     if (!res.ok) {
@@ -71,6 +93,24 @@ export default function App() {
     const res = await call('set_setting', key, value)
     if (!res.ok) setError(`Could not save setting (${res.error}).`)
     refresh()
+  }
+
+  async function runBrief() {
+    setBrief('loading')
+    const res = await call('generate_brief')
+    if (!res?.ok) {
+      setBrief(
+        res?.error === 'NO_API_KEY'
+          ? 'Add an Anthropic API key to generate a brief.'
+          : `Could not generate a brief (${res?.error ?? 'BRIDGE_ERROR'}).`
+      )
+      return
+    }
+    if (res.status === 'no_new') {
+      setBrief('no_new')
+      return
+    }
+    setBrief({ summary: res.summary, generated_at: res.generated_at })
   }
 
   async function installService() {
@@ -93,13 +133,14 @@ export default function App() {
     <div className="app">
       <header className="header">
         <div className="title">Text<span>For</span>Me</div>
-        <div className={`status ${connected ? 'running' : ''}`}>
-          <span className="dot" aria-hidden="true" />
-          <span>{connected ? 'Service running' : 'Service stopped'}</span>
-          {connected && state.status?.replies_last_hour != null && (
-            <span className="meta">{state.status.replies_last_hour} replies past hour</span>
-          )}
-        </div>
+        <button
+          className="logs-btn brief-btn"
+          style={{ marginLeft: 'auto' }}
+          onClick={runBrief}
+          disabled={!connected || brief === 'loading'}
+        >
+          {brief === 'loading' ? 'Briefing…' : 'Brief me'}
+        </button>
         <button className="logs-btn" onClick={() => setShowPrompts(true)}>Prompts</button>
         <button className="logs-btn" onClick={() => setShowLogs(true)}>Logs</button>
       </header>
@@ -121,6 +162,7 @@ export default function App() {
             disabled={!connected}
             onSelect={setSelectedGuid}
             onToggle={toggleAi}
+            onToggleTimer={toggleTimer}
           />
         </section>
         <section className="right-col">
@@ -141,6 +183,13 @@ export default function App() {
         </section>
       </div>
 
+      {brief !== null && (
+        <BriefOverlay
+          state={brief}
+          onClose={() => setBrief(null)}
+          onRegenerate={runBrief}
+        />
+      )}
       {showLogs && <LogsOverlay onClose={() => setShowLogs(false)} />}
       {showPrompts && (
         <PromptsOverlay

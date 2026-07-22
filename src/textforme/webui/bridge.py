@@ -22,6 +22,9 @@ from ..tui.app import DaemonClient
 from ..tui.logs import clear_log_file, collect_log_lines
 
 _CALL_TIMEOUT = 8.0
+# The brief pulls history for several chats and makes a Sonnet call, so it
+# needs a much longer budget than a plain state/mutation request.
+_BRIEF_TIMEOUT = 60.0
 
 # The three owner-editable prompt settings surfaced in the Prompts screen.
 _PROMPT_KEYS = ("system_prompt", "persona_prompt", "style_profile")
@@ -36,12 +39,14 @@ class Bridge:
         self._thread.start()
         self._client = client or DaemonClient()
 
-    def _request(self, method: str, params: dict | None = None) -> dict[str, Any]:
+    def _request(
+        self, method: str, params: dict | None = None, timeout: float = _CALL_TIMEOUT
+    ) -> dict[str, Any]:
         future = asyncio.run_coroutine_threadsafe(
             self._client.request(method, params), self._loop
         )
         try:
-            return {"ok": True, "result": future.result(_CALL_TIMEOUT)}
+            return {"ok": True, "result": future.result(timeout)}
         except RuntimeError as exc:
             return {"ok": False, "error": str(exc)}
         except Exception:  # noqa: BLE001 - bridge must never leak tracebacks to JS
@@ -77,6 +82,11 @@ class Bridge:
     def set_ai(self, chat_guid: str, enabled: bool) -> dict[str, Any]:
         return self._request(
             "contacts.set_ai", {"chat_guid": chat_guid, "enabled": bool(enabled)}
+        )
+
+    def set_reply_timer(self, chat_guid: str, enabled: bool) -> dict[str, Any]:
+        return self._request(
+            "contacts.set_reply_timer", {"chat_guid": chat_guid, "enabled": bool(enabled)}
         )
 
     def set_note(self, chat_guid: str, description: str) -> dict[str, Any]:
@@ -117,6 +127,15 @@ class Bridge:
         except Exception:  # noqa: BLE001
             return {"ok": False, "error": "KEYCHAIN_ERROR"}
         return {"ok": True}
+
+    def generate_brief(self) -> dict[str, Any]:
+        """Generate a short summary of the conversations the AI has replied to
+        since the last brief. Returns {ok, status, summary?, generated_at?}."""
+        res = self._request("brief.generate", timeout=_BRIEF_TIMEOUT)
+        if not res["ok"]:
+            return res
+        result = res["result"]
+        return {"ok": True, **result}
 
     def list_models(self) -> dict[str, Any]:
         res = self._request("models.list")

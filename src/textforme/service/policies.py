@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timezone
 
 from ..config import Settings
 from ..database import ContactRecord
@@ -21,9 +20,6 @@ class PolicyInputs:
 
     contact: ContactRecord | None
     settings: Settings
-    now: datetime  # aware, local tz (quiet hours are local)
-    replies_last_hour: int
-    last_reply_at: datetime | None  # aware UTC, for this chat
     consecutive_failures: int
 
 
@@ -36,7 +32,7 @@ class Decision:
 
 def evaluate(inputs: PolicyInputs) -> Decision:
     """Ordered checks: unknown contact, group, paused, global off, contact off,
-    quiet hours, cooldown, rate limit, auto-pause threshold."""
+    auto-pause threshold."""
     settings = inputs.settings
 
     if inputs.contact is None:
@@ -54,18 +50,6 @@ def evaluate(inputs: PolicyInputs) -> Decision:
     if not inputs.contact.ai_enabled:
         return Decision(allowed=False, skip_reason=SkipReason.CONTACT_OFF)
 
-    if in_quiet_hours(inputs.now, settings.quiet_hours_start, settings.quiet_hours_end):
-        return Decision(allowed=False, skip_reason=SkipReason.QUIET_HOURS)
-
-    if inputs.last_reply_at is not None:
-        now_utc = inputs.now.astimezone(timezone.utc)
-        elapsed = (now_utc - inputs.last_reply_at).total_seconds()
-        if elapsed < settings.contact_cooldown_seconds:
-            return Decision(allowed=False, skip_reason=SkipReason.COOLDOWN)
-
-    if inputs.replies_last_hour >= settings.global_rate_limit_per_hour:
-        return Decision(allowed=False, skip_reason=SkipReason.RATE_LIMIT)
-
     if settings.failure_pause_threshold > 0 and (
         inputs.consecutive_failures >= settings.failure_pause_threshold
     ):
@@ -76,28 +60,6 @@ def evaluate(inputs: PolicyInputs) -> Decision:
         )
 
     return Decision(allowed=True)
-
-
-def in_quiet_hours(now_local: datetime, start: str, end: str) -> bool:
-    """start/end 'HH:MM'; empty either → False. Handles ranges crossing midnight
-    (e.g. 22:00–07:00)."""
-    if not start or not end:
-        return False
-
-    try:
-        start_h, start_m = start.split(":")
-        end_h, end_m = end.split(":")
-        start_minutes = int(start_h) * 60 + int(start_m)
-        end_minutes = int(end_h) * 60 + int(end_m)
-    except (ValueError, TypeError):
-        return False
-
-    now_minutes = now_local.hour * 60 + now_local.minute
-
-    if start_minutes <= end_minutes:
-        return start_minutes <= now_minutes < end_minutes
-    # Range crosses midnight.
-    return now_minutes >= start_minutes or now_minutes < end_minutes
 
 
 def validate_reply(text: str, max_chars: int) -> str:

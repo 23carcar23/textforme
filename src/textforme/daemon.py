@@ -7,9 +7,12 @@ Structure:
 - Daemon class holding components; dependency-injectable for tests
   (imsg_client, database, responder_factory).
 - watch loop: async for msg in imsg.watch_messages(since_rowid=settings.last_seen_rowid)
-  → process_message(msg) (spawned as a task; ReplyScheduler prevents concurrent
-  replies to one chat) → advance last_seen_rowid watermark after each event.
-- process_message implements steps 1–17, recording outcomes in the DB.
+  → process_message(msg) (spawned as a task; a per-chat lock keeps replies to
+  one chat ordered) → advance last_seen_rowid watermark after each event.
+- process_message gates each message through the policy layer, then either
+  replies immediately or, when the contact has the reply timer enabled,
+  accumulates the message behind a random 0–3 minute countdown so a burst
+  gets one batched reply (_fire_reply). Outcomes are recorded in the DB.
   The responder is (re)built lazily from keychain + settings so a replaced key
   or model takes effect without restart.
 - Socket server: asyncio.start_unix_server at config.SOCKET_PATH (chmod 0600,
@@ -32,6 +35,7 @@ import json
 import logging
 import logging.handlers
 import os
+import random
 import signal
 import time
 from collections.abc import Callable
@@ -51,8 +55,9 @@ from .messaging.events import (
 )
 from .messaging.models import Message
 from .service import policies
+from .service.briefer import generate_brief
 from .service.responder import AnthropicResponder
-from .service.scheduler import ReplyScheduler, apply_response_delay
+from .service.scheduler import ChatLocks, ReplyTimerManager
 
 logger = logging.getLogger("textformed")
 
@@ -89,15 +94,13 @@ class Daemon:
         self._models_cache: list[dict[str, str]] | None = None
         self._models_cache_time = 0.0
 
-        self.scheduler = ReplyScheduler()
+        # Per-chat locks serialize replies to one chat (in order, nothing
+        # dropped); the timer manager holds the realistic-texting batch
+        # countdowns for contacts with the reply timer enabled.
+        self._chat_locks = ChatLocks()
+        self._timers = ReplyTimerManager()
         self._tasks: set[asyncio.Task[Any]] = set()
         self._server: asyncio.base_events.Server | None = None
-
-        # Serializes the authoritative post-delay policy check; _inflight_replies
-        # counts authorized-but-not-yet-recorded replies so concurrent bursts
-        # can't defeat the global rate limit (ARCHITECTURE §6 step 13).
-        self._rate_lock = asyncio.Lock()
-        self._inflight_replies = 0
 
         self._watermark_lock = asyncio.Lock()
         self._last_seen_rowid = 0
@@ -158,6 +161,8 @@ class Daemon:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+
+        self._timers.cancel_all()
 
         pending = list(self._tasks)
         for task in pending:
@@ -273,14 +278,21 @@ class Daemon:
         if database.is_processed(msg.guid):
             return
 
+        # Every substantive, non-duplicate inbound text is noted in the log,
+        # regardless of whether AI is toggled on for this contact — the outcome
+        # (skipped/failed/replied) is logged separately below.
+        logger.info(
+            "message received chat=%s rowid=%s guid=%s", msg.chat_id, msg.rowid, msg.guid
+        )
+
         # Step 4: contact lookup, syncing from imsg if this chat_id is unknown.
         contact = database.get_contact_by_chat_id(msg.chat_id)
         if contact is None:
             await self._sync_contacts()
             contact = database.get_contact_by_chat_id(msg.chat_id)
 
-        # Steps 5-12: initial policy gate (cheap early filter; the authoritative
-        # re-evaluation happens after the delay, under the rate lock).
+        # Steps 5-12: policy gate. Without cooldown/rate-limit there is no
+        # need for a second post-delay re-evaluation — this decides it.
         settings = database.get_settings()
         decision = policies.evaluate(self._policy_inputs(contact, settings))
 
@@ -292,125 +304,134 @@ class Daemon:
             self._record_skip(msg, chat_guid_for_record, reason)
             return
 
-        # `allowed` implies a known, non-group contact.
+        # `allowed` implies a known, non-group, AI-enabled contact.
         assert contact is not None
         chat_guid = contact.chat_guid
 
-        # Step 13: wait, then re-evaluate the FULL policy with fresh state.
-        await apply_response_delay(settings.response_delay_seconds)
-        refreshed_contact = database.get_contact(chat_guid)
-        if refreshed_contact is None:
-            self._record_skip(msg, chat_guid, SkipReason.UNKNOWN_CONTACT)
+        if contact.reply_timer_enabled:
+            # Realistic-texting path: accumulate this message and let the
+            # per-chat countdown fire one batched reply. The first message of a
+            # burst starts the timer; later ones only get saved.
+            database.record_processed(msg.guid, chat_guid, "batched")
+            self._timers.add_message(chat_guid, msg)
+            if not self._timers.is_running(chat_guid):
+                delay = random.uniform(0.0, config.REPLY_TIMER_MAX_SECONDS)
+                self._timers.start(chat_guid, delay, self._fire_reply)
+                logger.info(
+                    "message guid=%s chat=%s batched (reply timer started, %.0fs)",
+                    msg.guid, chat_guid, delay,
+                )
+            else:
+                logger.info("message guid=%s chat=%s batched (reply timer running)", msg.guid, chat_guid)
             return
-        contact = refreshed_contact
 
-        if not self.scheduler.try_acquire(chat_guid):
-            # Another reply is already in flight for this chat; skip silently.
+        # Immediate path: reply to this message on its own. The per-chat lock
+        # keeps replies ordered without dropping any of them.
+        async with self._chat_locks.lock(chat_guid):
+            await self._reply_now(msg, contact, settings)
+
+    async def _fire_reply(self, chat_guid: str) -> None:
+        """Countdown expired for a batched chat: send one reply covering the
+        whole burst that accumulated during the window."""
+        assert self.database is not None
+        database = self.database
+
+        batch = self._timers.collect(chat_guid)
+        if not batch:
             return
+        # The full conversation (loaded below) already contains every batched
+        # message; the last one stands in as the "incoming" turn.
+        last_msg = batch[-1]
 
-        reserved = False
+        contact = database.get_contact(chat_guid)
+        settings = database.get_settings()
+        decision = policies.evaluate(self._policy_inputs(contact, settings))
+        if not decision.allowed:
+            if decision.trigger_auto_pause:
+                database.set_setting("paused", "true")
+            self._record_skip(last_msg, chat_guid, decision.skip_reason or SkipReason.UNKNOWN_CONTACT)
+            return
+        assert contact is not None
+
+        async with self._chat_locks.lock(chat_guid):
+            await self._reply_now(last_msg, contact, settings)
+
+    async def _reply_now(
+        self, msg: Message, contact: ContactRecord, settings: config.Settings
+    ) -> None:
+        """Load context, generate, send, and record one reply for ``msg``.
+
+        Shared by the immediate and batched paths; callers hold the chat lock.
+        """
+        assert self.database is not None
+        database = self.database
+
+        # Load conversation context.
         try:
-            # Authoritative policy check: serialized so concurrent tasks see each
-            # other's in-flight replies, and capacity is reserved before any
-            # generation starts.
-            async with self._rate_lock:
-                settings = database.get_settings()
-                decision = policies.evaluate(
-                    self._policy_inputs(contact, settings, extra_replies=self._inflight_replies)
-                )
-                if not decision.allowed:
-                    if decision.trigger_auto_pause:
-                        database.set_setting("paused", "true")
-                    self._record_skip(msg, chat_guid, decision.skip_reason or SkipReason.UNKNOWN_CONTACT)
-                    return
-                self._inflight_replies += 1
-                reserved = True
-            # Step 14: load conversation context.
-            try:
-                history = await self.imsg.get_history(contact.chat_id, settings.context_message_limit)
-            except ImsgError as exc:
-                self._record_failed(msg, contact, ErrorCode.IMSG_UNAVAILABLE, str(exc))
-                return
+            history = await self.imsg.get_history(contact.chat_id, settings.context_message_limit)
+        except ImsgError as exc:
+            self._record_failed(msg, contact, ErrorCode.IMSG_UNAVAILABLE, str(exc))
+            return
 
-            # Step 15: generate + validate the reply.
-            responder = self._get_responder()
-            if responder is None:
-                self._record_failed(msg, contact, ErrorCode.NO_API_KEY, "no Anthropic API key configured")
-                return
-            if not settings.selected_model_id:
-                self._record_failed(msg, contact, ErrorCode.NO_MODEL, "no model selected")
-                return
+        # Generate + validate the reply.
+        responder = self._get_responder()
+        if responder is None:
+            self._record_failed(msg, contact, ErrorCode.NO_API_KEY, "no Anthropic API key configured")
+            return
+        if not settings.selected_model_id:
+            self._record_failed(msg, contact, ErrorCode.NO_MODEL, "no model selected")
+            return
 
-            try:
-                reply_text = await responder.generate_reply(
-                    contact,
-                    history,
-                    msg,
-                    settings.selected_model_id,
-                    settings.maximum_reply_length,
-                    system_prompt=settings.system_prompt,
-                    persona_prompt=settings.persona_prompt,
-                    style_profile=settings.style_profile,
-                )
-            except AnthropicUnavailableError as exc:
-                detail = str(exc)
-                code = ErrorCode.ANTHROPIC_TIMEOUT if "timeout" in detail.lower() else ErrorCode.ANTHROPIC_ERROR
-                self._record_failed(msg, contact, code, detail)
-                return
-            except ReplyValidationError as exc:
-                self._record_failed(msg, contact, ErrorCode.VALIDATION_FAILED, str(exc))
-                return
+        try:
+            reply_text = await responder.generate_reply(
+                contact,
+                history,
+                msg,
+                settings.selected_model_id,
+                config.MAX_REPLY_CHARS,
+                system_prompt=settings.system_prompt,
+                persona_prompt=settings.persona_prompt,
+                style_profile=settings.style_profile,
+            )
+        except AnthropicUnavailableError as exc:
+            detail = str(exc)
+            code = ErrorCode.ANTHROPIC_TIMEOUT if "timeout" in detail.lower() else ErrorCode.ANTHROPIC_ERROR
+            self._record_failed(msg, contact, code, detail)
+            return
+        except ReplyValidationError as exc:
+            self._record_failed(msg, contact, ErrorCode.VALIDATION_FAILED, str(exc))
+            return
 
-            # Step 16: send.
-            try:
-                await self.imsg.send_message(contact.chat_id, reply_text)
-            except ImsgError as exc:
-                self._record_failed(msg, contact, ErrorCode.SEND_FAILED, str(exc))
-                return
+        # Send.
+        try:
+            await self.imsg.send_message(contact.chat_id, reply_text)
+        except ImsgError as exc:
+            self._record_failed(msg, contact, ErrorCode.SEND_FAILED, str(exc))
+            return
 
-            # Step 17: record success.
-            database.record_processed(msg.guid, contact.chat_guid, "replied", reply_sent=True)
-            database.set_contact_last_seen(contact.chat_guid, msg.guid)
-            self._last_error = None
-        finally:
-            if reserved:
-                self._inflight_replies -= 1
-            self.scheduler.release(chat_guid)
+        # Record success.
+        database.record_processed(msg.guid, contact.chat_guid, "replied", reply_sent=True)
+        database.set_contact_last_seen(contact.chat_guid, msg.guid)
+        logger.info("message guid=%s chat=%s replied", msg.guid, contact.chat_guid)
+        self._last_error = None
 
     def _policy_inputs(
         self,
         contact: ContactRecord | None,
         settings: config.Settings,
-        extra_replies: int = 0,
     ) -> policies.PolicyInputs:
-        """Assemble a fresh policy snapshot. extra_replies counts in-flight
-        authorized replies toward the global rate limit."""
+        """Assemble a fresh policy snapshot for the authorization decision."""
         assert self.database is not None
-        one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-        last_reply_dt: datetime | None = None
-        if contact is not None:
-            raw_last_reply = self.database.last_reply_at(contact.chat_guid)
-            if raw_last_reply:
-                last_reply_dt = self._parse_iso_utc(raw_last_reply)
         return policies.PolicyInputs(
             contact=contact,
             settings=settings,
-            now=datetime.now().astimezone(),
-            replies_last_hour=self.database.replies_since(one_hour_ago) + extra_replies,
-            last_reply_at=last_reply_dt,
             consecutive_failures=self.database.recent_consecutive_failures(),
         )
-
-    @staticmethod
-    def _parse_iso_utc(raw: str) -> datetime:
-        dt = datetime.fromisoformat(raw)
-        if dt.tzinfo is None:
-            return dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
 
     def _record_skip(self, msg: Message, chat_guid: str, reason: SkipReason) -> None:
         assert self.database is not None
         self.database.record_processed(msg.guid, chat_guid, f"skipped:{reason}")
+        logger.info("message guid=%s chat=%s skipped reason=%s", msg.guid, chat_guid, reason)
 
     def _record_failed(self, msg: Message, contact: ContactRecord, code: ErrorCode, detail: str) -> None:
         assert self.database is not None
@@ -495,7 +516,17 @@ class Daemon:
 
         if method == "contacts.list":
             contacts = database.list_contacts()
-            return {"contacts": [self._contact_to_dict(c) for c in contacts]}
+            active = self._timers.active()
+            payload = []
+            for c in contacts:
+                data = self._contact_to_dict(c)
+                remaining = active.get(c.chat_guid)
+                # Round up so a live timer never displays "0s" while ticking.
+                data["reply_timer_remaining"] = (
+                    int(remaining + 0.999) if remaining is not None else None
+                )
+                payload.append(data)
+            return {"contacts": payload}
 
         if method == "contacts.set_ai":
             chat_guid = params.get("chat_guid")
@@ -510,6 +541,23 @@ class Daemon:
                 raise _SocketError("BAD_PARAMS", str(exc)) from exc
             except KeyError as exc:
                 raise _SocketError("BAD_PARAMS", f"unknown contact: {chat_guid}") from exc
+            return {}
+
+        if method == "contacts.set_reply_timer":
+            chat_guid = params.get("chat_guid")
+            enabled = params.get("enabled")
+            if not isinstance(chat_guid, str) or not isinstance(enabled, bool):
+                raise _SocketError("BAD_PARAMS", "chat_guid (str) and enabled (bool) are required")
+            try:
+                database.set_contact_reply_timer(chat_guid, enabled)
+            except ValueError as exc:
+                if str(exc) == "GROUP_FORBIDDEN":
+                    raise _SocketError("GROUP_FORBIDDEN", "cannot set a reply timer for group chats") from exc
+                raise _SocketError("BAD_PARAMS", str(exc)) from exc
+            except KeyError as exc:
+                raise _SocketError("BAD_PARAMS", f"unknown contact: {chat_guid}") from exc
+            # Turning the timer off leaves any running countdown to fire on its
+            # own; the fire path re-checks policy, so this stays consistent.
             return {}
 
         if method == "contacts.set_description":
@@ -558,6 +606,9 @@ class Daemon:
                 raise _SocketError("UNKNOWN_KEY", f"unknown setting key: {key}") from exc
             return {}
 
+        if method == "brief.generate":
+            return await self._generate_brief()
+
         if method == "service.pause":
             database.set_setting("paused", "true")
             return {}
@@ -567,6 +618,60 @@ class Daemon:
             return {}
 
         raise _SocketError("UNKNOWN_METHOD", f"unknown method: {method}")
+
+    async def _generate_brief(self) -> dict[str, Any]:
+        """Summarize the conversations the AI has replied to since the last
+        brief. Returns {"status": "no_new"} when nothing new has happened,
+        otherwise {"status": "ok", "summary": ..., "generated_at": ...}."""
+        assert self.database is not None
+        database = self.database
+
+        raw = database.get_raw_settings()
+        last_brief_at = raw.get("last_brief_at", "") or ""
+
+        latest = database.latest_reply_at()
+        if latest is None or (last_brief_at and latest <= last_brief_at):
+            return {"status": "no_new"}
+
+        chat_guids = database.chats_with_replies_since(last_brief_at)
+        settings = database.get_settings()
+        conversations: list[tuple[ContactRecord, list[Message]]] = []
+        for chat_guid in chat_guids:
+            contact = database.get_contact(chat_guid)
+            if contact is None:
+                continue
+            try:
+                history = await self.imsg.get_history(
+                    contact.chat_id, settings.context_message_limit
+                )
+            except ImsgError:
+                continue
+            conversations.append((contact, history))
+
+        if not conversations:
+            return {"status": "no_new"}
+
+        api_key = self.api_key_getter()
+        if not api_key:
+            raise _SocketError("NO_API_KEY", "no Anthropic API key configured")
+        client = self._anthropic_factory(api_key)
+        try:
+            summary = await generate_brief(client, conversations)
+        except AnthropicUnavailableError as exc:
+            raise _SocketError("ANTHROPIC_UNAVAILABLE", str(exc)) from exc
+
+        if not summary:
+            return {"status": "no_new"}
+
+        generated_at = datetime.now(timezone.utc).isoformat()
+        # Watermark against the newest reply we actually summarized, so replies
+        # that arrive mid-generation still count as "new" next time.
+        database.set_setting("last_brief_at", latest)
+        return {
+            "status": "ok",
+            "summary": summary,
+            "generated_at": generated_at,
+        }
 
     async def _list_models(self) -> dict[str, Any]:
         """Live model list for the TUI's model picker, cached briefly. The key
@@ -599,6 +704,7 @@ class Daemon:
             "is_group": contact.is_group,
             "ai_enabled": contact.ai_enabled,
             "description": contact.description,
+            "reply_timer_enabled": contact.reply_timer_enabled,
         }
 
     async def _status(self) -> dict[str, Any]:

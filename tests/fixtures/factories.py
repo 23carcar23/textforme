@@ -17,15 +17,9 @@ def make_contact(
     ai_enabled: bool = True,
     last_seen_message_guid: str | None = None,
     description: str = "",
-    **kwargs: object,
+    reply_timer_enabled: bool = False,
 ) -> ContactRecord:
     """Create a ContactRecord with sensible defaults."""
-    # Allow overrides via kwargs
-    if kwargs:
-        for key, value in kwargs.items():
-            if hasattr(ContactRecord, key):
-                locals()[key] = value
-
     return ContactRecord(
         chat_guid=chat_guid,
         chat_id=chat_id,
@@ -36,6 +30,7 @@ def make_contact(
         ai_enabled=ai_enabled,
         last_seen_message_guid=last_seen_message_guid,
         description=description,
+        reply_timer_enabled=reply_timer_enabled,
     )
 
 
@@ -75,13 +70,7 @@ def make_settings(
     selected_model_id: str = "claude-3-5-sonnet-20241022",
     global_ai_enabled: bool = True,
     paused: bool = False,
-    maximum_reply_length: int = 300,
-    response_delay_seconds: float = 3.0,
     context_message_limit: int = 10,
-    quiet_hours_start: str = "",
-    quiet_hours_end: str = "",
-    global_rate_limit_per_hour: int = 20,
-    contact_cooldown_seconds: int = 60,
     failure_pause_threshold: int = 5,
     last_seen_rowid: int = 0,
     onboarding_complete: bool = False,
@@ -98,13 +87,7 @@ def make_settings(
         selected_model_id=selected_model_id,
         global_ai_enabled=global_ai_enabled,
         paused=paused,
-        maximum_reply_length=maximum_reply_length,
-        response_delay_seconds=response_delay_seconds,
         context_message_limit=context_message_limit,
-        quiet_hours_start=quiet_hours_start,
-        quiet_hours_end=quiet_hours_end,
-        global_rate_limit_per_hour=global_rate_limit_per_hour,
-        contact_cooldown_seconds=contact_cooldown_seconds,
         failure_pause_threshold=failure_pause_threshold,
         last_seen_rowid=last_seen_rowid,
         onboarding_complete=onboarding_complete,

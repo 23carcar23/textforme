@@ -1,7 +1,6 @@
 """Settings panel widget. Owner: Agent 3.
 
-Rows: AI Service on/off, Anthropic Model, API Key status, Reply Length,
-Response Delay, Context Limit, Quiet Hours, Global Rate Limit.
+Rows: AI Service on/off, Anthropic Model, API Key status, Context Limit.
 
 Per ARCHITECTURE.md §1 the TUI never talks to Anthropic or the Keychain
 value directly (only presence, during onboarding). So for v1 the API Key
@@ -19,7 +18,7 @@ from textual import events
 from textual.containers import Grid
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Input, Label, OptionList
+from textual.widgets import DataTable, Label, OptionList
 from textual.widgets.option_list import Option
 
 # (settings key, display label). Keys prefixed with "__" are synthetic
@@ -28,20 +27,13 @@ SETTINGS_ROWS: list[tuple[str, str]] = [
     ("global_ai_enabled", "AI Service"),
     ("selected_model_id", "Anthropic Model"),
     ("__api_key__", "API Key"),
-    ("maximum_reply_length", "Reply Length"),
-    ("response_delay_seconds", "Response Delay"),
     ("context_message_limit", "Context Limit"),
-    ("__quiet_hours__", "Quiet Hours"),
-    ("global_rate_limit_per_hour", "Rate Limit"),
 ]
 
 # Sensible cycle values (as strings, matching config.Settings typing) for
 # the "Enter cycles a value" rows.
 _CYCLES: dict[str, list[str]] = {
-    "response_delay_seconds": ["0", "3", "10", "30"],
-    "maximum_reply_length": ["150", "300", "600"],
-    "context_message_limit": ["5", "10", "25"],
-    "global_rate_limit_per_hour": ["10", "20", "60"],
+    "context_message_limit": ["5", "10", "25", "50", "unlimited"],
 }
 
 _API_KEY_HINT = "Replace the API key by re-running onboarding."
@@ -54,50 +46,6 @@ def _next_in_cycle(key: str, current: str) -> str:
     except ValueError:
         idx = -1
     return cycle[(idx + 1) % len(cycle)]
-
-
-class QuietHoursModal(ModalScreen[str | None]):
-    """Prompt for 'HH:MM-HH:MM', or empty to disable quiet hours.
-
-    Dismisses with the raw string typed (possibly empty) or None if
-    cancelled with Escape.
-    """
-
-    DEFAULT_CSS = """
-    QuietHoursModal {
-        align: center middle;
-    }
-    QuietHoursModal > Grid {
-        grid-size: 1;
-        grid-rows: auto auto auto;
-        width: 50;
-        height: 9;
-        border: round $primary;
-        background: $panel;
-        padding: 1 2;
-    }
-    """
-
-    def __init__(self, current: str) -> None:
-        super().__init__()
-        self._current = current
-
-    def compose(self):
-        with Grid():
-            yield Label("Quiet hours as HH:MM-HH:MM (empty disables):")
-            yield Input(value=self._current, placeholder="22:00-07:00", id="quiet-hours-input")
-            yield Label("Enter to save, Escape to cancel", classes="hint")
-
-    def on_mount(self) -> None:
-        self.query_one(Input).focus()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        self.dismiss(event.value.strip())
-
-    def on_key(self, event: events.Key) -> None:
-        if event.key == "escape":
-            event.stop()
-            self.dismiss(None)
 
 
 class ModelPickerModal(ModalScreen[str | None]):
@@ -242,10 +190,6 @@ class SettingsPanel(DataTable):
     def _display_value(self, key: str) -> str:
         if key == "__api_key__":
             return "Configured" if self._api_key_configured else "Not configured"
-        if key == "__quiet_hours__":
-            start = self._settings.get("quiet_hours_start", "")
-            end = self._settings.get("quiet_hours_end", "")
-            return f"{start}-{end}" if start and end else "Off"
         if key == "global_ai_enabled":
             return "ON" if self._settings.get("global_ai_enabled") == "true" else "OFF"
         if key == "selected_model_id":
@@ -285,31 +229,8 @@ class SettingsPanel(DataTable):
             new_value = "false" if self._settings.get("global_ai_enabled") == "true" else "true"
             self.post_message(self.Changed(key, new_value))
             return
-        if key == "__quiet_hours__":
-            self._prompt_quiet_hours()
-            return
         if key in _CYCLES:
             current = self._settings.get(key, _CYCLES[key][0])
             new_value = _next_in_cycle(key, current)
             self.post_message(self.Changed(key, new_value))
             return
-
-    def _prompt_quiet_hours(self) -> None:
-        current_display = self._display_value("__quiet_hours__")
-        current = "" if current_display == "Off" else current_display
-
-        def _apply(result: str | None) -> None:
-            if result is None:
-                return
-            if result == "":
-                self.post_message(self.Changed("quiet_hours_start", ""))
-                self.post_message(self.Changed("quiet_hours_end", ""))
-                return
-            if "-" not in result:
-                self.notify("Use the form HH:MM-HH:MM", severity="error")
-                return
-            start, _, end = result.partition("-")
-            self.post_message(self.Changed("quiet_hours_start", start.strip()))
-            self.post_message(self.Changed("quiet_hours_end", end.strip()))
-
-        self.app.push_screen(QuietHoursModal(current), _apply)
