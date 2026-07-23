@@ -35,6 +35,29 @@ uv tool install textforme
 textforme
 ```
 
+### Install from GitHub
+
+If the package isn't on PyPI (or you want the latest code), install straight
+from this repo:
+
+```bash
+brew install steipete/tap/imsg
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv tool install git+https://github.com/23carcar23/textforme.git
+textforme tui
+```
+
+Note: a git install ships the terminal UI only — the desktop UI's built
+frontend is not checked into the repo. To get the desktop UI from source you
+need Node installed, then:
+
+```bash
+git clone https://github.com/23carcar23/textforme.git
+cd textforme/frontend && npm install && npm run build
+cd .. && uv tool install .
+textforme
+```
+
 For from-source setup (developing the Python daemon or the React frontend), see [CLAUDE.md](CLAUDE.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Quick setup
