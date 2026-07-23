@@ -275,7 +275,7 @@ async def test_duplicate_guid_second_event_ignored_no_second_send():
     assert len(imsg.sent_messages) == 1
 
 
-# -- pipeline: policy skips (steps 5-12, delegated) ------------------------------
+# -- pipeline: policy skips (steps 5-10, delegated) ------------------------------
 
 
 @pytest.mark.asyncio
@@ -339,6 +339,50 @@ async def test_auto_pause_triggers_and_sets_paused():
     assert db._processed["g3"]["status"] == "skipped:auto_paused"
 
 
+# -- pipeline: fixed per-chat cooldown (anti-loop guard) -------------------------
+
+
+@pytest.mark.asyncio
+async def test_second_message_within_cooldown_is_skipped_then_later_one_sends():
+    db = FakeDatabase()
+    db.set_setting("selected_model_id", "claude-test")
+    db.upsert_contact(make_contact(chat_guid="c1", chat_id=1, ai_enabled=True))
+    imsg = FakeImsgClient()
+    daemon = make_daemon(database=db, imsg_client=imsg)
+
+    await daemon.process_message(make_message(rowid=1, guid="g1", chat_id=1, text="hi"))
+    assert db._processed["g1"]["status"] == "replied"
+    assert len(imsg.sent_messages) == 1
+
+    # A second message arrives right after: the fixed anti-loop cooldown
+    # blocks it (rapid-fire self-texting / bot-echo protection).
+    await daemon.process_message(make_message(rowid=2, guid="g2", chat_id=1, text="again"))
+    assert db._processed["g2"]["status"] == "skipped:cooldown"
+    assert len(imsg.sent_messages) == 1
+
+    # Once REPLY_COOLDOWN_SECONDS has elapsed, the next message is replied to
+    # normally.
+    daemon._last_reply_time["c1"] -= config.REPLY_COOLDOWN_SECONDS + 1
+    await daemon.process_message(make_message(rowid=3, guid="g3", chat_id=1, text="later"))
+    assert db._processed["g3"]["status"] == "replied"
+    assert len(imsg.sent_messages) == 2
+
+
+@pytest.mark.asyncio
+async def test_no_prior_reply_this_lifetime_is_not_a_cooldown_skip():
+    """A brand-new chat (nothing in _last_reply_time yet) must not be treated
+    as within cooldown."""
+    db = FakeDatabase()
+    db.set_setting("selected_model_id", "claude-test")
+    db.upsert_contact(make_contact(chat_guid="c1", chat_id=1, ai_enabled=True))
+    imsg = FakeImsgClient()
+    daemon = make_daemon(database=db, imsg_client=imsg)
+    assert daemon._last_reply_time == {}
+
+    await daemon.process_message(make_message(rowid=1, guid="g1", chat_id=1, text="hi"))
+    assert db._processed["g1"]["status"] == "replied"
+
+
 # -- pipeline: realistic-texting reply timer -------------------------------------
 
 
@@ -390,6 +434,11 @@ async def test_reply_timer_off_replies_to_each_message():
         await daemon.process_message(
             make_message(rowid=i + 1, guid=f"g{i}", chat_id=1, text=f"msg {i}")
         )
+        # Bypass the fixed anti-loop cooldown between iterations: this test
+        # covers the reply-timer-off path, not the cooldown (see
+        # test_policies.py / test_second_message_within_cooldown_is_skipped
+        # for that).
+        daemon._last_reply_time.pop("c1", None)
 
     # No batching: every message got its own immediate reply.
     assert len(imsg.sent_messages) == 3
@@ -644,8 +693,42 @@ async def test_socket_status():
     assert result["paused"] is False
     assert result["global_ai_enabled"] is True
     assert "imsg_ok" in result
+    assert "chat_db_readable" in result
     assert "replies_last_hour" in result
     assert result["last_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_socket_status_chat_db_readable_true(monkeypatch):
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+    monkeypatch.setattr(daemon_module.os, "access", lambda path, mode: True)
+    db = FakeDatabase()
+    daemon = make_daemon(database=db)
+    resp = await daemon._handle_request_line(json.dumps({"id": 3, "method": "status", "params": {}}).encode())
+    assert resp["ok"] is True
+    assert resp["result"]["chat_db_readable"] is True
+
+
+@pytest.mark.asyncio
+async def test_socket_status_chat_db_readable_false_when_missing(monkeypatch):
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+    monkeypatch.setattr(daemon_module.os, "access", lambda path, mode: True)
+    db = FakeDatabase()
+    daemon = make_daemon(database=db)
+    resp = await daemon._handle_request_line(json.dumps({"id": 3, "method": "status", "params": {}}).encode())
+    assert resp["ok"] is True
+    assert resp["result"]["chat_db_readable"] is False
+
+
+@pytest.mark.asyncio
+async def test_socket_status_chat_db_readable_false_when_no_access(monkeypatch):
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+    monkeypatch.setattr(daemon_module.os, "access", lambda path, mode: False)
+    db = FakeDatabase()
+    daemon = make_daemon(database=db)
+    resp = await daemon._handle_request_line(json.dumps({"id": 3, "method": "status", "params": {}}).encode())
+    assert resp["ok"] is True
+    assert resp["result"]["chat_db_readable"] is False
 
 
 @pytest.mark.asyncio

@@ -1,12 +1,13 @@
 """Unit tests for the policy layer (src/textforme/service/policies.py).
 
-Covers ARCHITECTURE §6 steps 5-12 in order, plus validate_reply edge cases.
+Covers ARCHITECTURE §6 steps 5-10 in order, plus validate_reply edge cases.
 """
 
 from __future__ import annotations
 
 import pytest
 
+from textforme import config
 from textforme.config import Settings
 from textforme.database import ContactRecord
 from textforme.messaging.events import ReplyValidationError, SkipReason
@@ -84,6 +85,48 @@ def test_global_off_wins_over_contact_off():
 def test_contact_off_skips():
     decision = evaluate(make_inputs(contact=make_contact(ai_enabled=False)))
     assert decision.skip_reason == SkipReason.CONTACT_OFF
+
+
+def test_cooldown_skips_when_recent():
+    decision = evaluate(
+        make_inputs(seconds_since_last_reply=config.REPLY_COOLDOWN_SECONDS - 0.1)
+    )
+    assert decision == Decision(allowed=False, skip_reason=SkipReason.COOLDOWN)
+
+
+def test_cooldown_allows_when_elapsed():
+    decision = evaluate(
+        make_inputs(seconds_since_last_reply=config.REPLY_COOLDOWN_SECONDS + 0.1)
+    )
+    assert decision.allowed is True
+
+
+def test_cooldown_none_allows():
+    # No reply has ever been sent to this chat this daemon lifetime.
+    decision = evaluate(make_inputs(seconds_since_last_reply=None))
+    assert decision.allowed is True
+
+
+def test_contact_off_wins_over_cooldown():
+    decision = evaluate(
+        make_inputs(
+            contact=make_contact(ai_enabled=False),
+            seconds_since_last_reply=0.0,
+        )
+    )
+    assert decision.skip_reason == SkipReason.CONTACT_OFF
+
+
+def test_cooldown_wins_over_auto_pause():
+    settings = make_settings(failure_pause_threshold=1)
+    decision = evaluate(
+        make_inputs(
+            settings=settings,
+            consecutive_failures=5,
+            seconds_since_last_reply=0.0,
+        )
+    )
+    assert decision.skip_reason == SkipReason.COOLDOWN
 
 
 def test_contact_off_wins_over_auto_pause():

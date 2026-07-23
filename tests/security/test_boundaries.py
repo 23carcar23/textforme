@@ -45,6 +45,9 @@ async def test_no_recorded_complete_call_ever_includes_tools(daemon_harness_fact
     for i, text in enumerate(payloads, start=1):
         await harness.imsg.push(make_message(rowid=i, guid=f"g{i}", chat_id=1, text=text))
         await wait_for_processed(harness.database, f"g{i}")
+        # Bypass the fixed anti-loop cooldown between iterations: this test is
+        # about the tools/tool_choice surface, not the cooldown.
+        harness.daemon._last_reply_time.pop("c1", None)
 
     assert len(harness.anthropic.calls) == len(payloads)
     for call in harness.anthropic.calls:

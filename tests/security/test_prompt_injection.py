@@ -47,6 +47,10 @@ async def test_injection_payloads_never_change_settings_or_toggles(daemon_harnes
         await harness.imsg.push(make_message(rowid=i, guid=guid, chat_id=1, text=payload))
         row = await wait_for_processed(harness.database, guid)
         assert row["status"] == "replied"  # contact is enabled; policy allows a reply
+        # Bypass the fixed anti-loop cooldown between iterations: this test is
+        # about injection payloads never mutating state, not about the
+        # cooldown itself (covered separately in test_pipeline.py).
+        harness.daemon._last_reply_time.pop("c1", None)
 
     # last_seen_rowid is expected (and required) to advance as a normal side
     # effect of processing each event -- everything else must be untouched.
@@ -55,8 +59,9 @@ async def test_injection_payloads_never_change_settings_or_toggles(daemon_harnes
 
     assert settings_after == settings_before
     assert contacts_after == contacts_before
-    # exactly the policy-allowed number of sends (one enabled contact, no
-    # rate limit / cooldown configured to block any of them)
+    # exactly the policy-allowed number of sends (one enabled contact; the
+    # fixed per-chat cooldown is bypassed above between iterations so it
+    # doesn't block any of them here)
     assert len(harness.imsg.sent_messages) == len(INJECTION_PAYLOADS)
 
     # Every payload reached the model only as a "user" conversation turn --

@@ -61,6 +61,35 @@ async def test_disabled_contact_never_replied_to(daemon_harness_factory):
     assert harness.imsg.sent_messages == []
 
 
+# -- 3. fixed per-chat cooldown (anti-loop guard) ------------------------------
+
+
+async def test_second_message_within_cooldown_is_skipped_then_later_one_sends(daemon_harness_factory):
+    harness = await daemon_harness_factory(
+        contacts=[make_contact(chat_guid="c1", chat_id=1, ai_enabled=True)],
+        settings={"selected_model_id": "claude-test"},
+    )
+
+    await harness.imsg.push(make_message(rowid=1, guid="g1", chat_id=1, text="hi"))
+    row1 = await wait_for_processed(harness.database, "g1")
+    assert row1["status"] == "replied"
+    assert len(harness.imsg.sent_messages) == 1
+
+    # A second message arrives immediately after: the fixed anti-loop cooldown
+    # blocks it (e.g. the owner texting themselves, or a bot echoing back).
+    await harness.imsg.push(make_message(rowid=2, guid="g2", chat_id=1, text="again"))
+    row2 = await wait_for_processed(harness.database, "g2")
+    assert row2["status"] == "skipped:cooldown"
+    assert len(harness.imsg.sent_messages) == 1
+
+    # Once the cooldown has elapsed, the next message is replied to normally.
+    harness.daemon._last_reply_time["c1"] -= config.REPLY_COOLDOWN_SECONDS + 1
+    await harness.imsg.push(make_message(rowid=3, guid="g3", chat_id=1, text="later"))
+    row3 = await wait_for_processed(harness.database, "g3")
+    assert row3["status"] == "replied"
+    assert len(harness.imsg.sent_messages) == 2
+
+
 # -- 5. groups ------------------------------------------------------------------
 
 
@@ -129,6 +158,11 @@ async def test_reply_timer_off_replies_to_every_message(daemon_harness_factory):
     for i in range(3):
         await harness.imsg.push(make_message(rowid=i + 1, guid=f"g{i}", chat_id=1, text=f"m{i}"))
         await wait_for_processed(harness.database, f"g{i}")
+        # Bypass the fixed anti-loop cooldown between iterations: this test
+        # covers the reply-timer-off path, not the cooldown (see
+        # test_second_message_within_cooldown_is_skipped_then_later_one_sends
+        # below for that).
+        harness.daemon._last_reply_time.pop("c1", None)
 
     assert len(harness.imsg.sent_messages) == 3
 

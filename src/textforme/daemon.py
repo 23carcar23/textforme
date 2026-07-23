@@ -40,6 +40,7 @@ import signal
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from . import config, contact_names, keychain
@@ -99,6 +100,10 @@ class Daemon:
         # countdowns for contacts with the reply timer enabled.
         self._chat_locks = ChatLocks()
         self._timers = ReplyTimerManager()
+        # In-memory only (resets on restart, by design): chat_guid ->
+        # time.monotonic() of the last successfully sent reply, backing the
+        # fixed anti-loop cooldown (config.REPLY_COOLDOWN_SECONDS).
+        self._last_reply_time: dict[str, float] = {}
         self._tasks: set[asyncio.Task[Any]] = set()
         self._server: asyncio.base_events.Server | None = None
 
@@ -291,10 +296,12 @@ class Daemon:
             await self._sync_contacts()
             contact = database.get_contact_by_chat_id(msg.chat_id)
 
-        # Steps 5-12: policy gate. Without cooldown/rate-limit there is no
-        # need for a second post-delay re-evaluation — this decides it.
+        # Steps 5-10: policy gate. The fixed per-chat cooldown is the only
+        # time-based check, evaluated fresh here against in-memory state —
+        # there is no separate post-delay re-evaluation step.
         settings = database.get_settings()
-        decision = policies.evaluate(self._policy_inputs(contact, settings))
+        chat_guid = contact.chat_guid if contact is not None else None
+        decision = policies.evaluate(self._policy_inputs(contact, settings, chat_guid))
 
         if not decision.allowed:
             if decision.trigger_auto_pause:
@@ -345,7 +352,7 @@ class Daemon:
 
         contact = database.get_contact(chat_guid)
         settings = database.get_settings()
-        decision = policies.evaluate(self._policy_inputs(contact, settings))
+        decision = policies.evaluate(self._policy_inputs(contact, settings, chat_guid))
         if not decision.allowed:
             if decision.trigger_auto_pause:
                 database.set_setting("paused", "true")
@@ -412,6 +419,7 @@ class Daemon:
         # Record success.
         database.record_processed(msg.guid, contact.chat_guid, "replied", reply_sent=True)
         database.set_contact_last_seen(contact.chat_guid, msg.guid)
+        self._last_reply_time[contact.chat_guid] = time.monotonic()
         logger.info("message guid=%s chat=%s replied", msg.guid, contact.chat_guid)
         self._last_error = None
 
@@ -419,13 +427,19 @@ class Daemon:
         self,
         contact: ContactRecord | None,
         settings: config.Settings,
+        chat_guid: str | None = None,
     ) -> policies.PolicyInputs:
         """Assemble a fresh policy snapshot for the authorization decision."""
         assert self.database is not None
+        last_reply = self._last_reply_time.get(chat_guid) if chat_guid is not None else None
+        seconds_since_last_reply = (
+            time.monotonic() - last_reply if last_reply is not None else None
+        )
         return policies.PolicyInputs(
             contact=contact,
             settings=settings,
             consecutive_failures=self.database.recent_consecutive_failures(),
+            seconds_since_last_reply=seconds_since_last_reply,
         )
 
     def _record_skip(self, msg: Message, chat_guid: str, reason: SkipReason) -> None:
@@ -722,12 +736,28 @@ class Daemon:
         return {
             "running": True,
             "imsg_ok": self._last_imsg_health,
+            "chat_db_readable": self._chat_db_readable(),
             "global_ai_enabled": settings.global_ai_enabled,
             "paused": settings.paused,
             "model_id": settings.selected_model_id,
             "replies_last_hour": replies_last_hour,
             "last_error": self._last_error,
         }
+
+    @staticmethod
+    def _chat_db_readable() -> bool:
+        """Cheap, content-free check: can this (daemon) process read chat.db?
+
+        Never reads or logs the file's contents — just an existence + access
+        check so onboarding/status can tell whether the daemon process (which
+        may have different Full Disk Access than the interactive terminal)
+        can see Messages at all.
+        """
+        chat_db = Path.home() / "Library" / "Messages" / "chat.db"
+        try:
+            return chat_db.exists() and os.access(chat_db, os.R_OK)
+        except OSError:
+            return False
 
 
 def _configure_logging() -> None:

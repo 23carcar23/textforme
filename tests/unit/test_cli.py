@@ -34,6 +34,7 @@ class ConnectedFakeDaemonClient(FakeDaemonClient):
         return {
             "running": True,
             "imsg_ok": True,
+            "chat_db_readable": True,
             "global_ai_enabled": True,
             "paused": False,
             "model_id": "claude-x",
@@ -157,6 +158,25 @@ def test_install_subcommand_calls_launchagent_install_and_start(monkeypatch):
     assert calls == ["install", "start"]
 
 
+def test_install_subcommand_prints_error_and_exits_1_on_launchagent_error(monkeypatch, capsys):
+    monkeypatch.setattr(cli.sys, "argv", ["textforme", "install"])
+
+    def _raise_install():
+        raise cli.launchagent.LaunchAgentError("launchctl bootstrap failed: Bootstrap failed: 5: Input/output error")
+
+    monkeypatch.setattr(cli.launchagent, "install", _raise_install)
+    monkeypatch.setattr(cli.launchagent, "start", lambda: None)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code == 1
+    output = capsys.readouterr()
+    assert "Bootstrap failed" in output.err
+    assert "daemon.err.log" in output.err
+    assert "installed and started" not in output.out
+
+
 def test_uninstall_subcommand_calls_launchagent_uninstall(monkeypatch):
     monkeypatch.setattr(cli.sys, "argv", ["textforme", "uninstall"])
 
@@ -202,6 +222,7 @@ def test_status_subcommand_reports_reachable_daemon_fields(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "reachable" in output.lower()
     assert "claude-x" in output
+    assert "chat_db_readable: True" in output
 
 
 # -- unknown command ----------------------------------------------------
@@ -240,3 +261,54 @@ def test_stop_subcommand_calls_launchagent_stop(monkeypatch):
         cli.main()
     assert excinfo.value.code == 0
     assert calls == ["stop"]
+
+
+def test_start_subcommand_prints_error_and_exits_1_on_launchagent_error(monkeypatch, capsys):
+    monkeypatch.setattr(cli.sys, "argv", ["textforme", "start"])
+
+    def _raise_start():
+        raise cli.launchagent.LaunchAgentError("launchctl kickstart failed: No such process")
+
+    monkeypatch.setattr(cli.launchagent, "start", _raise_start)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code == 1
+    output = capsys.readouterr()
+    assert "No such process" in output.err
+    assert "service started" not in output.out
+
+
+def test_stop_subcommand_prints_error_and_exits_1_on_launchagent_error(monkeypatch, capsys):
+    monkeypatch.setattr(cli.sys, "argv", ["textforme", "stop"])
+
+    def _raise_stop():
+        raise cli.launchagent.LaunchAgentError("launchctl bootout failed: Operation not permitted")
+
+    monkeypatch.setattr(cli.launchagent, "stop", _raise_stop)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code == 1
+    output = capsys.readouterr()
+    assert "Operation not permitted" in output.err
+    assert "service stopped" not in output.out
+
+
+def test_uninstall_subcommand_prints_error_and_exits_1_on_launchagent_error(monkeypatch, capsys):
+    monkeypatch.setattr(cli.sys, "argv", ["textforme", "uninstall"])
+
+    def _raise_uninstall():
+        raise cli.launchagent.LaunchAgentError("launchctl bootout failed: Operation not permitted")
+
+    monkeypatch.setattr(cli.launchagent, "uninstall", _raise_uninstall)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code == 1
+    output = capsys.readouterr()
+    assert "Operation not permitted" in output.err
+    assert "uninstalled" not in output.out

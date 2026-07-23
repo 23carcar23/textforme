@@ -91,6 +91,23 @@ class FakeDaemonClientConnected:
         return None
 
 
+class FakeDaemonClientFdaBlocked:
+    """Stand-in for tui.app.DaemonClient: connects, but the daemon reports it
+    cannot read chat.db (headless process lacks Full Disk Access)."""
+
+    def __init__(self, socket_path=None, timeout: float = 5.0) -> None:
+        pass
+
+    async def connect(self) -> bool:
+        return True
+
+    async def request(self, method: str, params: dict | None = None) -> dict:
+        return {"running": True, "imsg_ok": False, "chat_db_readable": False}
+
+    async def close(self) -> None:
+        return None
+
+
 # -- needs_onboarding() -----------------------------------------------------
 
 
@@ -202,6 +219,49 @@ def test_run_onboarding_stores_key_in_keychain_and_never_in_db(tmp_path, monkeyp
     assert fake_key not in captured.err
 
 
+def test_run_onboarding_survives_launchagent_error(tmp_path, monkeypatch, capsys):
+    """If launchagent.install()/start() raise LaunchAgentError, onboarding
+    prints the error and a retry hint but still completes successfully."""
+    db_path = tmp_path / "textforme.db"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr(config, "SOCKET_PATH", tmp_path / "daemon.sock")
+    monkeypatch.setattr(config, "ensure_dirs", lambda: None)
+    _patch_happy_system_checks(monkeypatch)
+
+    fake_key = "sk-ant-super-secret-value-should-never-leak"
+    monkeypatch.setattr(onboarding.getpass, "getpass", lambda prompt="": fake_key)
+    monkeypatch.setattr(onboarding, "AnthropicClient", FakeAnthropicClient)
+    monkeypatch.setattr(onboarding.keychain, "set_api_key", lambda key: None)
+
+    fake_db = FakeDatabase(db_path)
+    monkeypatch.setattr(onboarding, "Database", lambda path: fake_db)
+    monkeypatch.setattr(onboarding, "ImsgClient", FakeImsgClient)
+    monkeypatch.setattr(onboarding, "DaemonClient", FakeDaemonClientConnected)
+
+    def _raise_install():
+        raise onboarding.launchagent.LaunchAgentError(
+            "launchctl bootstrap failed: Bootstrap failed: 5: Input/output error"
+        )
+
+    monkeypatch.setattr(onboarding.launchagent, "install", _raise_install)
+    start_calls: list[str] = []
+    monkeypatch.setattr(onboarding.launchagent, "start", lambda: start_calls.append("start"))
+    monkeypatch.setattr(onboarding, "_wait_for_socket", lambda timeout=10.0: False)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "1")
+
+    result = onboarding.run_onboarding()
+
+    # Setup still completes -- the failure is degraded-mode, not fatal.
+    assert result is True
+    # start() must not be called since install() raised.
+    assert start_calls == []
+
+    output = capsys.readouterr().out
+    assert "Could not start the background service" in output
+    assert "Bootstrap failed" in output
+    assert "textforme install" in output
+
+
 def test_run_onboarding_reprompts_on_rejected_key(tmp_path, monkeypatch):
     db_path = tmp_path / "textforme.db"
     monkeypatch.setattr(config, "DB_PATH", db_path)
@@ -246,6 +306,43 @@ def test_run_onboarding_aborts_without_touching_keychain_on_system_check_failure
 
     assert result is False
     assert set_key_calls == []
+
+
+def test_run_onboarding_warns_when_daemon_lacks_full_disk_access(tmp_path, monkeypatch, capsys):
+    """The local (terminal-side) check can pass while the headless daemon
+    process still can't read chat.db -- onboarding should surface that
+    specific warning (from the daemon's own status response) but still
+    complete successfully."""
+    db_path = tmp_path / "textforme.db"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr(config, "SOCKET_PATH", tmp_path / "daemon.sock")
+    monkeypatch.setattr(config, "ensure_dirs", lambda: None)
+    _patch_happy_system_checks(monkeypatch)
+
+    fake_key = "sk-ant-super-secret-value-should-never-leak"
+    monkeypatch.setattr(onboarding.getpass, "getpass", lambda prompt="": fake_key)
+    monkeypatch.setattr(onboarding, "AnthropicClient", FakeAnthropicClient)
+    monkeypatch.setattr(onboarding.keychain, "set_api_key", lambda key: None)
+
+    fake_db = FakeDatabase(db_path)
+    monkeypatch.setattr(onboarding, "Database", lambda path: fake_db)
+    monkeypatch.setattr(onboarding, "ImsgClient", FakeImsgClient)
+    monkeypatch.setattr(onboarding, "DaemonClient", FakeDaemonClientFdaBlocked)
+    monkeypatch.setattr(onboarding.launchagent, "install", lambda: None)
+    monkeypatch.setattr(onboarding.launchagent, "start", lambda: None)
+    monkeypatch.setattr(onboarding, "_wait_for_socket", lambda timeout=10.0: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "1")
+
+    result = onboarding.run_onboarding()
+
+    assert result is True
+    output = capsys.readouterr().out
+    assert "cannot read the Messages database" in output
+    assert "Full Disk Access" in output
+    assert "/opt/homebrew/bin/imsg" in output
+    assert "libexec/imsg" in output
+    assert "textforme stop" in output
+    assert "textforme start" in output
 
 
 def test_run_onboarding_handles_keyboard_interrupt_cleanly(monkeypatch, capsys):

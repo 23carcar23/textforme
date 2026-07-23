@@ -210,13 +210,19 @@ def _wait_for_socket(timeout: float = _SOCKET_WAIT_SECONDS) -> bool:
     return config.SOCKET_PATH.exists()
 
 
-async def _dry_test() -> bool:
-    """Prefer the daemon socket; fall back to a direct ImsgClient health check."""
+async def _dry_test() -> tuple[bool, dict | None]:
+    """Prefer the daemon socket; fall back to a direct ImsgClient health check.
+
+    Returns (ok, daemon_status). daemon_status is the daemon's "status" RPC
+    response when the daemon was reachable (so callers can inspect fields
+    like chat_db_readable / imsg_ok), or None when the daemon wasn't reachable
+    and we fell back to a direct ImsgClient check.
+    """
     client = DaemonClient()
     try:
         if await client.connect():
-            await client.request("status")
-            return True
+            status = await client.request("status")
+            return True, status
     except Exception:  # noqa: BLE001
         pass
     finally:
@@ -225,14 +231,42 @@ async def _dry_test() -> bool:
     fallback = ImsgClient()
     try:
         await fallback.start()
-        return await fallback.health_check()
+        return await fallback.health_check(), None
     except Exception:  # noqa: BLE001
-        return False
+        return False, None
     finally:
         try:
             await fallback.stop()
         except Exception:  # noqa: BLE001
             pass
+
+
+_FDA_WARNING_LINES = (
+    "  WARNING: The background service cannot read the Messages database (Full Disk Access).",
+    "      -> Grant Full Disk Access in System Settings > Privacy & Security > Full Disk",
+    "         Access to your terminal app AND to the real imsg binary — /opt/homebrew/bin/imsg",
+    "         is only a wrapper script; the actual binary is at",
+    "         /opt/homebrew/Cellar/imsg/<version>/libexec/imsg",
+    "      -> Then run: textforme stop  &&  textforme start",
+)
+
+
+def _print_daemon_fda_warning_if_needed(daemon_status: dict | None) -> None:
+    """After a successful daemon connection, warn if the daemon process itself
+    (as opposed to this interactive terminal) lacks Full Disk Access.
+
+    The daemon runs headless under launchd as a separate FDA-responsible
+    process from the terminal that ran onboarding, so the local
+    `_check_chat_db_readable` check above can pass while the daemon still
+    can't read Messages. This is additional, non-fatal: onboarding still
+    completes either way.
+    """
+    if daemon_status is None:
+        return
+    if daemon_status.get("chat_db_readable") is False:
+        print()
+        for line in _FDA_WARNING_LINES:
+            print(line)
 
 
 def run_onboarding() -> bool:
@@ -267,18 +301,24 @@ def run_onboarding() -> bool:
         print()
 
         print("Installing the background service...")
-        launchagent.install()
-        launchagent.start()
+        try:
+            launchagent.install()
+            launchagent.start()
+        except launchagent.LaunchAgentError as exc:
+            print(f"  Could not start the background service: {exc}")
+            print("  You can retry later with: textforme install")
         if _wait_for_socket():
             print("  Service is running.")
         else:
             print("  Service did not report ready within 10s; check `textforme status` afterward.")
 
         print("Running a dry connectivity test (no messages will be sent)...")
-        if asyncio.run(_dry_test()):
+        dry_ok, daemon_status = asyncio.run(_dry_test())
+        if dry_ok:
             print("  Dry test passed.")
         else:
             print("  Dry test could not confirm connectivity; check Full Disk Access and imsg setup.")
+        _print_daemon_fda_warning_if_needed(daemon_status)
 
         print()
         print("Setup complete. Launching TextForMe...")

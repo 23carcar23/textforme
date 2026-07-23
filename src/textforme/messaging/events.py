@@ -56,6 +56,7 @@ class SkipReason(StrEnum):
     CONTACT_OFF = "contact_off"
     UNKNOWN_CONTACT = "unknown_contact"
     AUTO_PAUSED = "auto_paused"
+    COOLDOWN = "cooldown"
 
 
 class ProcessStatus(StrEnum):
