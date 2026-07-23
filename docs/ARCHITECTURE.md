@@ -94,8 +94,9 @@ Response `{"id":N,"ok":true,"result":{...}}` or
 
 Methods:
 - `ping` → `{}`
-- `status` → `{running:true, imsg_ok:bool, global_ai_enabled:bool, paused:bool,
-   model_id:str, replies_last_hour:int, last_error:str|null}`
+- `status` → `{running:true, imsg_ok:bool, chat_db_readable:bool,
+   global_ai_enabled:bool, paused:bool, model_id:str, replies_last_hour:int,
+   last_error:str|null}`
 - `contacts.list` → `{contacts:[{chat_guid, chat_id, display_name, address,
    service, is_group, ai_enabled, description}]}` (groups included but toggling
    them is rejected)
@@ -131,22 +132,26 @@ silently ignored where noted) and stops:
 6. Emergency `paused` → skip (`skipped:paused`).
 7. `global_ai_enabled` off → skip (`skipped:global_off`).
 8. Contact `ai_enabled` off → skip (`skipped:contact_off`).
-9. Quiet hours → skip (`skipped:quiet_hours`).
-10. Per-contact cooldown (`contact_cooldown_seconds` since last reply to that chat) → skip (`skipped:cooldown`).
-11. Global rate limit (`global_rate_limit_per_hour` replies across contacts) → skip (`skipped:rate_limit`).
-12. Auto-pause: if the last `failure_pause_threshold` processing attempts all failed,
-    set `paused=true` and skip.
-13. Wait `response_delay_seconds`; then re-evaluate the FULL policy (steps 5–12)
-    with fresh state under the daemon's rate lock, counting in-flight authorized
-    replies toward the global rate limit (reserved capacity) so a concurrent
-    burst can never exceed `global_rate_limit_per_hour`.
-14. Load last `context_message_limit` messages via `messages.history`.
-15. `AnthropicResponder.generate_reply(...)` with timeout; validate reply.
-16. `send` via ImsgClient.
-17. Record `replied` + `reply_sent_at`; update contact `last_seen_message_guid`;
-    persist `last_seen_rowid` watermark (cursor) in settings.
+9. Fixed per-chat cooldown: if a reply was already sent to this chat within
+   the last `config.REPLY_COOLDOWN_SECONDS` (5s, hardcoded — not a setting)
+   → skip (`skipped:cooldown`). Tracked in-memory only
+   (`chat_guid -> time.monotonic()` of the last successful send), reset on
+   daemon restart; exists purely as an anti-loop guard against rapid-fire
+   exchanges (e.g. the owner texting themselves, or a bot echoing back).
+10. Auto-pause: if the last `failure_pause_threshold` processing attempts all
+    failed, set `paused=true` and skip.
+11. If the contact has the reply timer enabled, accumulate this message and
+    start (or let run) a random 0–`REPLY_TIMER_MAX_SECONDS` countdown for the
+    chat; the batched reply fires later, re-evaluating the FULL policy
+    (steps 5–10) with fresh state before replying.
+12. Load last `context_message_limit` messages via `messages.history`.
+13. `AnthropicResponder.generate_reply(...)` with timeout; validate reply.
+14. `send` via ImsgClient.
+15. Record `replied` + `reply_sent_at`; update contact `last_seen_message_guid`;
+    persist `last_seen_rowid` watermark (cursor) in settings; record this
+    send's timestamp for the per-chat cooldown (step 9).
 
-Failures in 14–16 record status `failed` with `error_code` from
+Failures in 12–14 record status `failed` with `error_code` from
 `messaging.events.ErrorCode`. The rowid watermark advances even for
 skipped/failed messages so restarts never re-reply.
 

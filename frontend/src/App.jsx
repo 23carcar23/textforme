@@ -36,6 +36,7 @@ export default function App() {
   }, [error])
 
   const connected = Boolean(state?.connected)
+  const fdaWarning = connected && state?.status?.chat_db_readable === false
   const contacts = state?.contacts ?? []
   const selected = contacts.find((c) => c.chat_guid === selectedGuid) ?? null
 
@@ -149,6 +150,13 @@ export default function App() {
         <div className="banner">
           The background service is not running — contacts and settings are read-only until it starts.
           <button onClick={installService}>Start service</button>
+        </div>
+      )}
+      {fdaWarning && (
+        <div className="banner banner-fda">
+          The background service lacks Full Disk Access — it can't read your Messages. Grant Full
+          Disk Access to your terminal and to /opt/homebrew/Cellar/imsg/&lt;version&gt;/libexec/imsg
+          (the /opt/homebrew/bin/imsg command is only a wrapper), then restart the service.
         </div>
       )}
       {error && <div className="banner">{error}</div>}

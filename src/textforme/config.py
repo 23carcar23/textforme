@@ -39,6 +39,12 @@ REPLY_TIMER_MAX_SECONDS = 180
 # but finite cap on how many recent messages are pulled for context.
 UNLIMITED_CONTEXT_LIMIT = 1000
 
+# Fixed anti-loop guard: minimum time between two outgoing auto-replies to the
+# same chat, so a rapid-fire exchange (e.g. the owner texting themselves, or a
+# bot echoing back) can't create a tight reply loop. Deliberately NOT a
+# setting — no owner-facing knob, no entry in DEFAULT_SETTINGS/Settings.
+REPLY_COOLDOWN_SECONDS = 5.0
+
 
 def parse_context_limit(value: str) -> int:
     """Coerce a context_message_limit setting string to an int.

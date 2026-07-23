@@ -391,6 +391,12 @@ select:focus-visible {
   cursor: pointer;
 }
 
+.banner-fda {
+  background: rgba(255, 107, 107, 0.09);
+  border-bottom: 1px solid rgba(255, 107, 107, 0.35);
+  color: var(--red);
+}
+
 /* ---------- logs slide-over ---------- */
 
 .logs-overlay {

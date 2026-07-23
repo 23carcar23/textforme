@@ -16,6 +16,18 @@ from pathlib import Path
 
 from . import config
 
+
+class LaunchAgentError(RuntimeError):
+    """A launchctl subcommand failed and the daemon's actual load state
+    doesn't excuse the failure (see install()/start()/stop() docstrings)."""
+
+
+def _launchctl_error(subcommand: str, result: subprocess.CompletedProcess) -> LaunchAgentError:
+    stderr = (result.stderr or "").strip()
+    detail = stderr if stderr else f"exit code {result.returncode}"
+    return LaunchAgentError(f"launchctl {subcommand} failed: {detail}")
+
+
 # Embedded plist template
 PLIST_TEMPLATE = """\
 <?xml version="1.0" encoding="UTF-8"?>
@@ -62,7 +74,16 @@ def _get_textformed_path() -> str:
 
 
 def install() -> None:
-    """Write the plist and (re)load the agent. Idempotent."""
+    """Write the plist and (re)load the agent. Idempotent.
+
+    Raises:
+        LaunchAgentError: if `launchctl bootstrap` fails and the job isn't
+            actually loaded afterward. `bootstrap` can report a failure
+            (e.g. "Bootstrap failed: 5: Input/output error", or exit 37
+            "already bootstrapped") even though the job ends up loaded —
+            since we bootout first this should be rare, but we treat it as
+            success rather than raise a false alarm.
+    """
     config.ensure_dirs()
 
     # Render the plist template
@@ -79,17 +100,23 @@ def install() -> None:
     # (Re)load via launchctl
     uid = os.getuid()
 
-    # First, try to unload the agent (ignore if it doesn't exist)
+    # First, try to unload the agent. This is best-effort: booting out a
+    # job that isn't currently loaded legitimately fails, so its result is
+    # ignored.
     subprocess.run(
         ["launchctl", "bootout", f"gui/{uid}", str(config.LAUNCH_AGENT_PATH)],
         capture_output=True,
+        text=True,
     )
 
-    # Then load it
-    subprocess.run(
+    # Then load it.
+    result = subprocess.run(
         ["launchctl", "bootstrap", f"gui/{uid}", str(config.LAUNCH_AGENT_PATH)],
         capture_output=True,
+        text=True,
     )
+    if result.returncode != 0 and not is_running():
+        raise _launchctl_error("bootstrap", result)
 
 
 def uninstall() -> None:
@@ -122,20 +149,37 @@ def start() -> None:
     `stop()` boots the job out of launchd entirely, so starting must
     re-bootstrap (install() is idempotent and does bootout+bootstrap),
     not merely kickstart — kickstarting an unloaded job is a no-op.
+
+    Raises:
+        LaunchAgentError: propagated from install() if bootstrap fails, or
+            raised here if `launchctl kickstart` fails and the job is not
+            actually running afterward.
     """
     install()
 
     uid = os.getuid()
-    subprocess.run(
+    result = subprocess.run(
         ["launchctl", "kickstart", f"gui/{uid}/{config.LAUNCH_AGENT_LABEL}"],
         capture_output=True,
+        text=True,
     )
+    if result.returncode != 0 and not is_running():
+        raise _launchctl_error("kickstart", result)
 
 
 def stop() -> None:
-    """Stop the running daemon without uninstalling."""
+    """Stop the running daemon without uninstalling.
+
+    Raises:
+        LaunchAgentError: if `launchctl bootout` fails and the job is
+            still running afterward. Booting out a job that isn't loaded
+            legitimately fails and is ignored.
+    """
     uid = os.getuid()
-    subprocess.run(
+    result = subprocess.run(
         ["launchctl", "bootout", f"gui/{uid}/{config.LAUNCH_AGENT_LABEL}"],
         capture_output=True,
+        text=True,
     )
+    if result.returncode != 0 and is_running():
+        raise _launchctl_error("bootout", result)

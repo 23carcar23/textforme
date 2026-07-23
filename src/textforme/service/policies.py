@@ -1,6 +1,6 @@
 """Policy layer — the ONLY authorizer of outgoing replies. Owner: Agent 4.
 
-Implements pipeline steps 5–12 of ARCHITECTURE §6 as a pure decision function
+Implements pipeline steps 5–10 of ARCHITECTURE §6 as a pure decision function
 over inputs the daemon fetches, plus reply validation. Opus-reviewed.
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 import unicodedata
 from dataclasses import dataclass
 
+from .. import config
 from ..config import Settings
 from ..database import ContactRecord
 from ..messaging.events import ReplyValidationError, SkipReason
@@ -21,6 +22,9 @@ class PolicyInputs:
     contact: ContactRecord | None
     settings: Settings
     consecutive_failures: int
+    # Seconds since the daemon last sent a reply to this chat (in-memory,
+    # this daemon lifetime only); None if no reply has been sent yet.
+    seconds_since_last_reply: float | None = None
 
 
 @dataclass
@@ -32,7 +36,7 @@ class Decision:
 
 def evaluate(inputs: PolicyInputs) -> Decision:
     """Ordered checks: unknown contact, group, paused, global off, contact off,
-    auto-pause threshold."""
+    per-chat cooldown, auto-pause threshold."""
     settings = inputs.settings
 
     if inputs.contact is None:
@@ -49,6 +53,12 @@ def evaluate(inputs: PolicyInputs) -> Decision:
 
     if not inputs.contact.ai_enabled:
         return Decision(allowed=False, skip_reason=SkipReason.CONTACT_OFF)
+
+    if (
+        inputs.seconds_since_last_reply is not None
+        and inputs.seconds_since_last_reply < config.REPLY_COOLDOWN_SECONDS
+    ):
+        return Decision(allowed=False, skip_reason=SkipReason.COOLDOWN)
 
     if settings.failure_pause_threshold > 0 and (
         inputs.consecutive_failures >= settings.failure_pause_threshold

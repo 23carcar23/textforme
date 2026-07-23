@@ -45,6 +45,7 @@ class TestInstall:
                 with patch("textforme.launchagent.config.ensure_dirs"):
                     with patch("textforme.launchagent._get_textformed_path") as mock_path:
                         with patch("textforme.launchagent.subprocess.run") as mock_run:
+                            mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
                             mock_path.return_value = "/usr/local/bin/textformed"
                             launchagent.install()
 
@@ -64,7 +65,8 @@ class TestInstall:
             with patch("textforme.launchagent.config.LOG_DIR", log_dir):
                 with patch("textforme.launchagent.config.ensure_dirs"):
                     with patch("textforme.launchagent._get_textformed_path") as mock_path:
-                        with patch("textforme.launchagent.subprocess.run"):
+                        with patch("textforme.launchagent.subprocess.run") as mock_run:
+                            mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
                             mock_path.return_value = textformed_path
                             launchagent.install()
 
@@ -84,7 +86,8 @@ class TestInstall:
             with patch("textforme.launchagent.config.LOG_DIR", log_dir):
                 with patch("textforme.launchagent.config.ensure_dirs") as mock_ensure:
                     with patch("textforme.launchagent._get_textformed_path") as mock_path:
-                        with patch("textforme.launchagent.subprocess.run"):
+                        with patch("textforme.launchagent.subprocess.run") as mock_run:
+                            mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
                             mock_path.return_value = "/usr/local/bin/textformed"
                             launchagent.install()
                             mock_ensure.assert_called_once()
@@ -100,6 +103,7 @@ class TestInstall:
                     with patch("textforme.launchagent._get_textformed_path") as mock_path:
                         with patch("textforme.launchagent.subprocess.run") as mock_run:
                             with patch("textforme.launchagent.os.getuid") as mock_uid:
+                                mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
                                 mock_path.return_value = "/usr/local/bin/textformed"
                                 mock_uid.return_value = 501
                                 launchagent.install()
@@ -112,6 +116,57 @@ class TestInstall:
                                 # Second call: bootstrap
                                 assert calls[1][0][0] == ["launchctl", "bootstrap", "gui/501", str(plist_path)]
 
+    def test_install_raises_when_bootstrap_fails_and_not_running(self, tmp_path):
+        """bootstrap failing AND the job not being loaded afterward raises."""
+        plist_path = tmp_path / "test.plist"
+        log_dir = tmp_path / "logs"
+
+        with patch("textforme.launchagent.config.LAUNCH_AGENT_PATH", plist_path):
+            with patch("textforme.launchagent.config.LOG_DIR", log_dir):
+                with patch("textforme.launchagent.config.ensure_dirs"):
+                    with patch("textforme.launchagent._get_textformed_path") as mock_path:
+                        with patch("textforme.launchagent.subprocess.run") as mock_run:
+                            with patch("textforme.launchagent.os.getuid") as mock_uid:
+                                with patch("textforme.launchagent.is_running") as mock_is_running:
+                                    mock_path.return_value = "/usr/local/bin/textformed"
+                                    mock_uid.return_value = 501
+                                    mock_is_running.return_value = False
+                                    # bootout succeeds, bootstrap fails
+                                    mock_run.side_effect = [
+                                        Mock(returncode=0, stdout="", stderr=""),
+                                        Mock(returncode=1, stdout="", stderr="Bootstrap failed: 5: Input/output error"),
+                                    ]
+
+                                    with pytest.raises(launchagent.LaunchAgentError) as excinfo:
+                                        launchagent.install()
+
+                                    assert "bootstrap" in str(excinfo.value)
+                                    assert "Input/output error" in str(excinfo.value)
+
+    def test_install_does_not_raise_when_bootstrap_fails_but_job_is_loaded(self, tmp_path):
+        """bootstrap reporting failure (e.g. 'already bootstrapped') is
+        tolerated as long as the job is actually loaded afterward."""
+        plist_path = tmp_path / "test.plist"
+        log_dir = tmp_path / "logs"
+
+        with patch("textforme.launchagent.config.LAUNCH_AGENT_PATH", plist_path):
+            with patch("textforme.launchagent.config.LOG_DIR", log_dir):
+                with patch("textforme.launchagent.config.ensure_dirs"):
+                    with patch("textforme.launchagent._get_textformed_path") as mock_path:
+                        with patch("textforme.launchagent.subprocess.run") as mock_run:
+                            with patch("textforme.launchagent.os.getuid") as mock_uid:
+                                with patch("textforme.launchagent.is_running") as mock_is_running:
+                                    mock_path.return_value = "/usr/local/bin/textformed"
+                                    mock_uid.return_value = 501
+                                    mock_is_running.return_value = True
+                                    mock_run.side_effect = [
+                                        Mock(returncode=0, stdout="", stderr=""),
+                                        Mock(returncode=37, stdout="", stderr="Bootstrap failed: 37: Already bootstrapped"),
+                                    ]
+
+                                    # Should not raise
+                                    launchagent.install()
+
     def test_install_idempotent(self, tmp_path):
         """install() can be called multiple times safely."""
         plist_path = tmp_path / "test.plist"
@@ -121,7 +176,8 @@ class TestInstall:
             with patch("textforme.launchagent.config.LOG_DIR", log_dir):
                 with patch("textforme.launchagent.config.ensure_dirs"):
                     with patch("textforme.launchagent._get_textformed_path") as mock_path:
-                        with patch("textforme.launchagent.subprocess.run"):
+                        with patch("textforme.launchagent.subprocess.run") as mock_run:
+                            mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
                             mock_path.return_value = "/usr/local/bin/textformed"
                             # Call install twice
                             launchagent.install()
@@ -245,8 +301,9 @@ class TestStart:
 
         with patch("textforme.launchagent.config.LAUNCH_AGENT_PATH", plist_path):
             with patch("textforme.launchagent.install") as mock_install:
-                with patch("textforme.launchagent.subprocess.run"):
+                with patch("textforme.launchagent.subprocess.run") as mock_run:
                     with patch("textforme.launchagent.os.getuid") as mock_uid:
+                        mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
                         mock_uid.return_value = 501
                         launchagent.start()
                         mock_install.assert_called_once()
@@ -260,12 +317,56 @@ class TestStart:
                 with patch("textforme.launchagent.subprocess.run") as mock_run:
                     with patch("textforme.launchagent.os.getuid") as mock_uid:
                         mock_uid.return_value = 501
+                        mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
                         launchagent.start()
                         # Verify kickstart was called
                         mock_run.assert_called_once_with(
                             ["launchctl", "kickstart", "gui/501/com.textforme.daemon"],
                             capture_output=True,
+                            text=True,
                         )
+
+    def test_start_raises_when_kickstart_fails_and_not_running(self, tmp_path):
+        """kickstart failing AND the job not being running afterward raises."""
+        plist_path = tmp_path / "test.plist"
+
+        with patch("textforme.launchagent.config.LAUNCH_AGENT_PATH", plist_path):
+            with patch("textforme.launchagent.install"):
+                with patch("textforme.launchagent.subprocess.run") as mock_run:
+                    with patch("textforme.launchagent.os.getuid") as mock_uid:
+                        with patch("textforme.launchagent.is_running") as mock_is_running:
+                            mock_uid.return_value = 501
+                            mock_is_running.return_value = False
+                            mock_run.return_value = Mock(returncode=1, stdout="", stderr="No such process")
+                            with pytest.raises(launchagent.LaunchAgentError) as excinfo:
+                                launchagent.start()
+                            assert "kickstart" in str(excinfo.value)
+                            assert "No such process" in str(excinfo.value)
+
+    def test_start_does_not_raise_when_kickstart_fails_but_running(self, tmp_path):
+        """kickstart reporting failure is tolerated if the job is actually running."""
+        plist_path = tmp_path / "test.plist"
+
+        with patch("textforme.launchagent.config.LAUNCH_AGENT_PATH", plist_path):
+            with patch("textforme.launchagent.install"):
+                with patch("textforme.launchagent.subprocess.run") as mock_run:
+                    with patch("textforme.launchagent.os.getuid") as mock_uid:
+                        with patch("textforme.launchagent.is_running") as mock_is_running:
+                            mock_uid.return_value = 501
+                            mock_is_running.return_value = True
+                            mock_run.return_value = Mock(returncode=1, stdout="", stderr="some transient error")
+                            # Should not raise
+                            launchagent.start()
+
+    def test_start_propagates_install_failure(self, tmp_path):
+        """A LaunchAgentError from install() propagates out of start()."""
+        plist_path = tmp_path / "test.plist"
+
+        with patch("textforme.launchagent.config.LAUNCH_AGENT_PATH", plist_path):
+            with patch("textforme.launchagent.install") as mock_install:
+                mock_install.side_effect = launchagent.LaunchAgentError("bootstrap failed")
+                with pytest.raises(launchagent.LaunchAgentError):
+                    launchagent.start()
 
 
 class TestStop:
@@ -276,20 +377,39 @@ class TestStop:
         with patch("textforme.launchagent.subprocess.run") as mock_run:
             with patch("textforme.launchagent.os.getuid") as mock_uid:
                 mock_uid.return_value = 501
+                mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
                 launchagent.stop()
                 mock_run.assert_called_once_with(
                     ["launchctl", "bootout", "gui/501/com.textforme.daemon"],
                     capture_output=True,
+                    text=True,
                 )
 
-    def test_stop_ignores_failure(self):
-        """stop() doesn't raise even if bootout fails."""
+    def test_stop_ignores_failure_when_job_not_running(self):
+        """stop() doesn't raise if bootout fails but the job isn't running
+        afterward (e.g. it was already unloaded — a legitimate failure)."""
         with patch("textforme.launchagent.subprocess.run") as mock_run:
             with patch("textforme.launchagent.os.getuid") as mock_uid:
-                mock_uid.return_value = 501
-                mock_run.return_value = Mock(returncode=1)  # Non-zero, ignored
-                # Should not raise
-                launchagent.stop()
+                with patch("textforme.launchagent.is_running") as mock_is_running:
+                    mock_uid.return_value = 501
+                    mock_is_running.return_value = False
+                    mock_run.return_value = Mock(returncode=1, stdout="", stderr="No such process")
+                    # Should not raise
+                    launchagent.stop()
+
+    def test_stop_raises_when_bootout_fails_and_job_still_running(self):
+        """stop() raises if bootout fails and the job is still running
+        afterward — a real failure, not just 'wasn't loaded'."""
+        with patch("textforme.launchagent.subprocess.run") as mock_run:
+            with patch("textforme.launchagent.os.getuid") as mock_uid:
+                with patch("textforme.launchagent.is_running") as mock_is_running:
+                    mock_uid.return_value = 501
+                    mock_is_running.return_value = True
+                    mock_run.return_value = Mock(returncode=1, stdout="", stderr="Operation not permitted")
+                    with pytest.raises(launchagent.LaunchAgentError) as excinfo:
+                        launchagent.stop()
+                    assert "bootout" in str(excinfo.value)
+                    assert "Operation not permitted" in str(excinfo.value)
 
 
 class TestPlistTemplate:

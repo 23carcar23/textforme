@@ -71,8 +71,8 @@ textforme (TUI/webui)  <-- JSON-lines over Unix socket -->  textformed (daemon)
   shapes.
 - The incoming-message pipeline is a fixed, ordered policy chain in
   `daemon.py` (dedup → group check → paused → global toggle → contact toggle
-  → quiet hours → cooldown → rate limit → auto-pause → delay+re-evaluate →
-  generate → validate → send → record). First failing check records
+  → fixed 5s per-chat cooldown → auto-pause → [optional reply-timer batching]
+  → generate → validate → send → record). First failing check records
   `skipped:<reason>` and stops; the rowid watermark advances even on
   skip/failure so a restart never re-replies. See ARCHITECTURE.md §6 for the
   exact order before changing `daemon.py` or `service/policies.py`.

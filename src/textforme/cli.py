@@ -35,6 +35,7 @@ _USAGE = """Usage:
 _STATUS_FIELDS = (
     "running",
     "imsg_ok",
+    "chat_db_readable",
     "global_ai_enabled",
     "paused",
     "model_id",
@@ -43,27 +44,51 @@ _STATUS_FIELDS = (
 )
 
 
+_LAUNCHCTL_HINT = "Check ~/Library/Logs/TextForMe/daemon.err.log for more detail."
+
+
+def _print_launchagent_error(exc: launchagent.LaunchAgentError) -> None:
+    print(f"Error: {exc}", file=sys.stderr)
+    print(_LAUNCHCTL_HINT, file=sys.stderr)
+
+
 def _cmd_install() -> int:
-    launchagent.install()
-    launchagent.start()
+    try:
+        launchagent.install()
+        launchagent.start()
+    except launchagent.LaunchAgentError as exc:
+        _print_launchagent_error(exc)
+        return 1
     print("TextForMe service installed and started.")
     return 0
 
 
 def _cmd_uninstall() -> int:
-    launchagent.uninstall()
+    try:
+        launchagent.uninstall()
+    except launchagent.LaunchAgentError as exc:
+        _print_launchagent_error(exc)
+        return 1
     print("TextForMe service stopped and uninstalled (your data was kept).")
     return 0
 
 
 def _cmd_start() -> int:
-    launchagent.start()
+    try:
+        launchagent.start()
+    except launchagent.LaunchAgentError as exc:
+        _print_launchagent_error(exc)
+        return 1
     print("TextForMe service started.")
     return 0
 
 
 def _cmd_stop() -> int:
-    launchagent.stop()
+    try:
+        launchagent.stop()
+    except launchagent.LaunchAgentError as exc:
+        _print_launchagent_error(exc)
+        return 1
     print("TextForMe service stopped (still installed; it will return at next login).")
     return 0
 
